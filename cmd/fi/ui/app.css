@@ -1,0 +1,347 @@
+/* Токены — из design/build.mjs. Тёмная тема основная, светлая — вместе с системной. */
+:root {
+  color-scheme: dark;
+  --bg: #0B0A0D;
+  --sunken: #08070A;
+  --panel: #131116;
+  --raised: #1B1820;
+  --hover: #24202A;
+  --line: #26222B;
+  --line-strong: #36313C;
+  --text: #F1EEF3;
+  --text-2: #A7A1AD;
+  --text-3: #6F6977;
+  --violet: #7C4FE0;
+  --violet-hover: #8A5FEA;
+  --violet-pressed: #6A40CC;
+  --violet-text: #B294F7;
+  --violet-tint: rgba(154, 108, 240, 0.14);
+  --violet-line: rgba(154, 108, 240, 0.45);
+  --red: #E5484D;
+  --red-text: #F2787C;
+  --red-tint: rgba(229, 72, 77, 0.14);
+  --amber-text: #F0BA62;
+  --amber-tint: rgba(235, 169, 69, 0.14);
+  --neutral-tint: rgba(255, 255, 255, 0.06);
+  --seg-sel: #2A2530;
+  --knob-off: #A7A1AD;
+  --glow: radial-gradient(closest-side, rgba(229, 72, 77, 0.17), rgba(140, 92, 242, 0.08) 60%, transparent);
+  --ui: 'Onest', 'Segoe UI Variable Text', 'Segoe UI', system-ui, sans-serif;
+  --mono: 'JetBrains Mono', 'Cascadia Mono', Consolas, monospace;
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    color-scheme: light;
+    --bg: #F6F4F8;
+    --sunken: #EDEAF0;
+    --panel: #FFFFFF;
+    --raised: #F3F0F5;
+    --hover: #EAE6EE;
+    --line: #E6E2EA;
+    --line-strong: #D4CEDA;
+    --text: #16131A;
+    --text-2: #5E5865;
+    --text-3: #8E8895;
+    --violet: #6E3FD8;
+    --violet-hover: #7B4EE3;
+    --violet-pressed: #5E33C0;
+    --violet-text: #6437CC;
+    --violet-tint: rgba(110, 63, 216, 0.10);
+    --violet-line: rgba(110, 63, 216, 0.40);
+    --red: #D1343A;
+    --red-text: #C42B31;
+    --red-tint: rgba(209, 52, 58, 0.10);
+    --amber-text: #9A6412;
+    --amber-tint: rgba(201, 138, 43, 0.14);
+    --neutral-tint: rgba(22, 19, 26, 0.05);
+    --seg-sel: #FFFFFF;
+    --knob-off: #FFFFFF;
+    --glow: radial-gradient(closest-side, rgba(229, 72, 77, 0.10), rgba(110, 63, 216, 0.05) 60%, transparent);
+  }
+}
+
+* { box-sizing: border-box; }
+
+/* Содержимое масштабируется под размер окна (app.js), поэтому прокрутки у страницы нет. */
+html { overflow: hidden; }
+html, body { height: 100%; margin: 0; }
+#scale {
+  width: 100%; height: 100%;
+  transform-origin: top left;
+  display: flex;
+  flex-direction: column;
+}
+body {
+  overflow: hidden;
+  background: var(--bg);
+  color: var(--text);
+  font: 13px/1.45 var(--ui);
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+  cursor: default;
+}
+button, input { font: inherit; color: inherit; }
+button { cursor: default; }
+h1, p { margin: 0; }
+
+/* ─── Окно ─── */
+.titlebar {
+  --wails-draggable: drag;
+  height: 40px;
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 4px 0 14px;
+}
+.brand { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 600; }
+.window-buttons { --wails-draggable: no-drag; display: flex; gap: 2px; }
+.win-btn {
+  width: 36px; height: 30px;
+  display: grid; place-items: center;
+  border: 0; border-radius: 6px;
+  background: transparent; color: var(--text-2);
+}
+.win-btn:hover { background: var(--neutral-tint); color: var(--text); }
+
+main {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 4px 16px 16px;
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+main::-webkit-scrollbar { width: 8px; }
+main::-webkit-scrollbar-thumb { background: var(--line-strong); border-radius: 4px; border: 2px solid var(--bg); }
+
+.loading { flex: 1; display: grid; place-items: center; color: var(--text-3); }
+
+/* ─── Общие блоки ─── */
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
+.stack { display: flex; flex-direction: column; gap: 8px; }
+.section-label { display: flex; justify-content: space-between; padding: 0 4px; font-size: 12px; font-weight: 600; color: var(--text-3); }
+.mono { font-family: var(--mono); font-size: 12px; color: var(--text); user-select: text; }
+.muted { color: var(--text-2); }
+.strong { font-size: 14px; font-weight: 500; }
+.hint { margin-top: auto; font-size: 12px; line-height: 17px; color: var(--text-3); text-wrap: pretty; }
+.hint.center { margin-top: 0; text-align: center; }
+.field-error { font-size: 12px; line-height: 17px; color: var(--red-text); padding-left: 2px; }
+.empty { padding: 16px 14px; font-size: 12.5px; color: var(--text-2); }
+.grid-2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+
+.subheader { display: flex; align-items: center; gap: 4px; margin: 0 -8px; }
+.subheader h1 { flex: 1; font-size: 16px; font-weight: 600; letter-spacing: -0.005em; }
+
+/* ─── Главный статус ─── */
+.hero-panel { position: relative; flex: none; }
+.hero-panel::before {
+  content: '';
+  position: absolute; left: -60px; top: -50px;
+  width: 240px; height: 170px;
+  background: var(--glow);
+  pointer-events: none;
+}
+.hero { position: relative; display: flex; align-items: center; gap: 14px; padding: 16px; }
+.hero svg { flex: none; }
+.hero-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.hero-title { font-size: 17px; line-height: 22px; font-weight: 700; letter-spacing: -0.01em; }
+.hero-sub { font-size: 12.5px; line-height: 17px; color: var(--text-2); text-wrap: pretty; }
+.hero-task { position: relative; display: flex; align-items: center; gap: 12px; padding: 0 10px 12px 16px; }
+.hero-task .progress { flex: 1; }
+
+/* ─── Строки ─── */
+.row { display: flex; align-items: center; gap: 12px; min-height: 58px; padding: 10px 12px; }
+.row + .row { border-top: 1px solid var(--line); }
+.row.site-row { min-height: 50px; padding: 8px 6px 8px 12px; }
+.tile {
+  width: 36px; height: 36px; flex: none;
+  display: grid; place-items: center;
+  border-radius: 9px; border: 1px solid var(--line);
+  background: var(--raised); color: var(--text-2);
+}
+.row-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.row-title { font-size: 14px; font-weight: 600; }
+.row-title-sm { font-size: 13.5px; font-weight: 600; }
+.row-sub { font-size: 12.5px; color: var(--text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.row-sub.wrap { white-space: normal; font-size: 12px; line-height: 16px; }
+
+.settings-row { display: flex; align-items: center; gap: 12px; padding: 12px 14px; }
+.settings-row.column { flex-direction: column; align-items: stretch; gap: 10px; }
+.settings-row + .settings-row { border-top: 1px solid var(--line); }
+.button-row { display: flex; flex-wrap: wrap; gap: 8px; }
+
+.footer {
+  margin-top: auto;
+  display: flex; align-items: center; justify-content: space-between;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+}
+.footer .meta { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-3); }
+.footer-actions { display: flex; gap: 2px; }
+
+/* ─── Метки ─── */
+.badge {
+  flex: none;
+  display: inline-flex; align-items: center; gap: 6px;
+  height: 22px; padding: 0 8px;
+  border: 1px solid transparent; border-radius: 6px;
+  font-size: 12px; font-weight: 600; line-height: 1; white-space: nowrap;
+}
+.badge .dot { width: 6px; height: 6px; border-radius: 3px; background: currentColor; }
+.badge.ok { color: var(--violet-text); background: var(--violet-tint); }
+.badge.warn { color: var(--amber-text); background: var(--amber-tint); }
+.badge.fail { color: var(--red-text); background: var(--red-tint); }
+.badge.check { color: var(--text-2); background: var(--neutral-tint); }
+.badge.off { color: var(--text-3); background: var(--neutral-tint); }
+.badge.proxy { color: var(--violet-text); background: transparent; border-color: var(--violet-line); }
+
+/* ─── Кнопки и поля ─── */
+.btn {
+  height: 36px;
+  display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+  padding: 0 14px;
+  border: 1px solid var(--line-strong); border-radius: 8px;
+  background: var(--raised); color: var(--text);
+  font-size: 13.5px; font-weight: 600; white-space: nowrap;
+}
+.btn:hover { background: var(--hover); }
+.btn:active { background: var(--line); }
+.btn:disabled { background: transparent; border-color: var(--line); color: var(--text-3); }
+.btn.primary { background: var(--violet); border-color: transparent; color: #FFFFFF; }
+.btn.primary:hover { background: var(--violet-hover); }
+.btn.primary:active { background: var(--violet-pressed); }
+.btn.primary:disabled { background: var(--raised); border-color: var(--line); color: var(--text-3); }
+.btn.ghost { background: transparent; border-color: transparent; color: var(--text-2); }
+.btn.ghost:hover { background: var(--neutral-tint); color: var(--text); }
+.btn.sm { height: 30px; padding: 0 10px; font-size: 12.5px; }
+.btn.full { width: 100%; }
+
+.icon-btn {
+  width: 32px; height: 32px; flex: none;
+  display: grid; place-items: center;
+  border: 0; border-radius: 8px;
+  background: transparent; color: var(--text-2);
+}
+.icon-btn:hover { background: var(--neutral-tint); color: var(--text); }
+.icon-btn:disabled { color: var(--text-3); background: transparent; }
+
+.btn:focus-visible, .icon-btn:focus-visible, .win-btn:focus-visible, .toggle:focus-visible, .seg button:focus-visible, .option:focus-visible {
+  outline: 2px solid var(--violet-text);
+  outline-offset: 2px;
+}
+
+.toggle {
+  position: relative; flex: none;
+  width: 40px; height: 22px; padding: 0;
+  border: 0; border-radius: 11px;
+  background: var(--line-strong);
+}
+.toggle::after {
+  content: '';
+  position: absolute; top: 3px; left: 3px;
+  width: 16px; height: 16px; border-radius: 8px;
+  background: var(--knob-off);
+  transition: left 0.15s ease, background 0.15s ease;
+}
+.toggle.on { background: var(--violet); }
+.toggle.on::after { left: 21px; background: #FFFFFF; }
+.toggle:disabled { opacity: 0.45; }
+
+.seg { align-self: flex-start; display: flex; gap: 2px; padding: 3px; background: var(--sunken); border: 1px solid var(--line); border-radius: 8px; }
+.seg button { height: 26px; padding: 0 10px; border: 0; border-radius: 6px; background: transparent; color: var(--text-2); font-size: 12.5px; font-weight: 600; }
+.seg button.on { background: var(--seg-sel); color: var(--text); box-shadow: inset 0 0 0 1px var(--line-strong); }
+.seg button:disabled { color: var(--text-3); }
+
+.input {
+  height: 40px;
+  display: flex; align-items: center; gap: 8px;
+  padding: 0 5px 0 12px;
+  background: var(--sunken); color: var(--text-3);
+  border: 1px solid var(--line-strong); border-radius: 8px;
+}
+.input:focus-within { border-color: var(--violet); box-shadow: 0 0 0 3px var(--violet-tint); }
+.input.is-error { border-color: var(--red); box-shadow: 0 0 0 3px var(--red-tint); }
+.input input {
+  flex: 1; min-width: 0;
+  border: 0; outline: 0; background: transparent;
+  font-family: var(--mono); font-size: 13px; color: var(--text);
+  user-select: text;
+}
+.input input::placeholder { font-family: var(--ui); color: var(--text-3); }
+
+.progress { height: 6px; border-radius: 3px; background: var(--line); overflow: hidden; }
+.progress > span { display: block; height: 100%; border-radius: 3px; background: var(--violet); transition: width 0.3s ease; }
+.progress-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; font-size: 13px; font-weight: 600; }
+
+/* ─── Экраны ─── */
+.onboarding { gap: 8px; padding-top: 12px; }
+.eyebrow { font-size: 12px; font-weight: 600; color: var(--text-3); }
+.display { font-size: 21px; line-height: 27px; font-weight: 700; letter-spacing: -0.015em; text-wrap: pretty; }
+.lead { font-size: 13px; line-height: 19px; color: var(--text-2); text-wrap: pretty; }
+.code {
+  margin-top: 4px; padding: 8px 10px;
+  font-family: var(--mono); font-size: 12px;
+  background: var(--sunken); border: 1px solid var(--line); border-radius: 8px;
+  white-space: nowrap; overflow-x: auto; user-select: text;
+}
+.setup-actions { margin-top: auto; display: flex; flex-direction: column; gap: 8px; }
+
+.option {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 10px;
+  min-height: 88px; padding: 12px;
+  border: 1px solid var(--line); border-radius: 10px;
+  background: var(--panel); color: var(--text); text-align: left;
+}
+.option:hover { background: var(--raised); border-color: var(--line-strong); }
+.option > svg { color: var(--text-2); }
+.option-text { display: flex; flex-direction: column; gap: 2px; }
+.option-hint { font-size: 12px; color: var(--text-2); }
+
+.result { display: flex; flex-direction: column; gap: 8px; padding: 14px; flex: none; }
+.result-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.result-text { font-size: 12.5px; line-height: 18px; color: var(--text-2); text-wrap: pretty; }
+.result-meta { font-size: 12px; color: var(--text-3); }
+.notice { display: flex; align-items: center; gap: 10px; padding: 16px; color: var(--text-2); }
+
+/* Панель с overflow: hidden во flex-колонке сжимается и обрезает содержимое — пусть лучше прокручивается окно. */
+main > .panel { flex: none; }
+
+.finding { display: flex; flex-direction: column; gap: 6px; padding: 12px 14px; }
+.finding + .finding { border-top: 1px solid var(--line); }
+.finding .result-head { align-items: flex-start; }
+.finding .result-head .badge { flex: none; }
+.finding-detail { font-size: 12px; line-height: 16px; color: var(--text-2); overflow-wrap: anywhere; }
+.finding-actions { display: flex; gap: 8px; padding-top: 2px; }
+.check-row { display: flex; align-items: center; gap: 8px; padding: 8px 14px; font-size: 12.5px; color: var(--text-2); }
+.check-row + .check-row { border-top: 1px solid var(--line); }
+.check-row svg { flex: none; color: var(--text-3); }
+
+.select {
+  flex: 1; min-width: 0; height: 30px; padding: 0 8px;
+  background: var(--sunken); color: var(--text); font: inherit; font-size: 12.5px;
+  border: 1px solid var(--line-strong); border-radius: 8px; cursor: pointer;
+}
+.select:focus-visible { outline: 2px solid var(--violet); outline-offset: 1px; }
+
+.input-row { display: flex; gap: 8px; align-items: center; }
+.input-row .input { flex: 1; min-width: 0; }
+.input-row .btn { flex: none; }
+
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip {
+  padding: 5px 10px; border: 1px solid var(--line-strong); border-radius: 999px;
+  background: transparent; color: var(--text-2); font: inherit; font-size: 12.5px; line-height: 16px; cursor: pointer;
+}
+.chip:hover { background: var(--hover); color: var(--text); }
+.chip.on { background: var(--violet-tint); border-color: var(--violet-line); color: var(--violet-text); }
+
+@keyframes spin { to { transform: rotate(360deg); } }
+.spin { animation: spin 0.9s linear infinite; }
+@media (prefers-reduced-motion: reduce) {
+  .spin { animation: none; }
+  .toggle::after, .progress > span { transition: none; }
+}

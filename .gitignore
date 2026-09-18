@@ -1,0 +1,37 @@
+# Сборка
+/build/
+*.syso
+/dist/
+*.exe
+*.test
+*.out
+
+# Сторонние бинарники движка — скачиваются скриптом с проверкой sha256
+/third_party/bin/
+
+# Секретный ключ подписи обновлений — только у того, кто выпускает версии
+/keys/
+*.key
+
+# Программы, которые вшиваются в установщик при сборке
+/cmd/fi-setup/payload/*.exe
+
+# Отчёты стенда
+/reports/
+
+# Дизайн: собранный холст и временные превью (исходники — design/build.mjs и design/artboards)
+/design/*-interface.html
+/design/.preview/
+
+# Frontend
+node_modules/
+/cmd/fi/frontend/dist/
+
+# Локальный предпросмотр интерфейса (пути на конкретной машине)
+/.claude/launch.json
+
+# IDE / ОС
+.idea/
+.vscode/
+Thumbs.db
+.DS_Store
