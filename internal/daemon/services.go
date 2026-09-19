@@ -45,11 +45,13 @@ var serviceGroups = []struct {
 
 // checkTargets — цели периодической проверки: сервисы, сайты пользователя и контроль связи.
 // Чужие заблокированные сайты и Cloudflare сюда не входят: это цели подбора,
-// а в окне человек видит то, чем пользуется сам.
-func checkTargets(sites []string) []probe.Target {
+// а в окне человек видит то, чем пользуется сам. Когда работает прокси для Telegram,
+// Telegram проверяется через него (telegramResult), а не по сайту: у многих провайдеров
+// адреса Telegram закрыты, и сайт не откроется, хотя приложение работает.
+func checkTargets(sites []string, tgProxy bool) []probe.Target {
 	var targets []probe.Target
 	for _, t := range probe.DefaultTargets() {
-		if t.Group != "blocked" && t.Group != "cloudflare" {
+		if t.Group != "blocked" && t.Group != "cloudflare" && !(tgProxy && t.Group == "telegram") {
 			targets = append(targets, t)
 		}
 	}
@@ -123,6 +125,64 @@ func serviceState(s Service, offline bool) string {
 	default:
 		return StatePartial
 	}
+}
+
+// failedTargets — цели, проверка которых не прошла: их стоит перепроверить.
+func failedTargets(results []probe.Result) []probe.Target {
+	var failed []probe.Target
+	for _, r := range results {
+		if r.Status != probe.OK && r.Status != probe.Slow {
+			failed = append(failed, r.Target)
+		}
+	}
+	return failed
+}
+
+// mergeRetry подставляет результаты повторной проверки вместо первых: сбой, который
+// не повторился, был случайным.
+func mergeRetry(first, again []probe.Result) []probe.Result {
+	merged := slices.Clone(first)
+	for _, r := range again {
+		for i := range merged {
+			if merged[i].Target == r.Target {
+				merged[i] = r
+			}
+		}
+	}
+	return merged
+}
+
+// changes — что изменилось в сервисах с прошлой проверки, для журнала.
+func changes(prev, cur []Service) []string {
+	was := make(map[string]Service, len(prev))
+	for _, s := range prev {
+		was[s.ID] = s
+	}
+	var out []string
+	for _, s := range cur {
+		p, ok := was[s.ID]
+		if ok && p.State == s.State && p.Detail == s.Detail {
+			continue
+		}
+		line := s.Title + ": " + stateText[s.State]
+		if ok {
+			line = s.Title + ": " + stateText[p.State] + " → " + stateText[s.State]
+		}
+		if s.Detail != "" {
+			line += " (" + s.Detail + ")"
+		}
+		out = append(out, line)
+	}
+	return out
+}
+
+var stateText = map[string]string{
+	StateOK:      "работает",
+	StateSlow:    "замедлено",
+	StatePartial: "частично",
+	StateFail:    "не работает",
+	StateUnknown: "нет связи",
+	StateEmpty:   "проверять нечего",
 }
 
 // regressed — какой-то сервис работал при прошлой проверке и сломался сейчас.

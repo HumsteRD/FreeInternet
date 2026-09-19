@@ -168,7 +168,7 @@ func (s *Server) dialCF(ctx context.Context, k poolKey) (upstream, error) {
 			}
 			s.cfActive[k.dc] = base
 			s.cfMu.Unlock()
-			ws.viaCF = true
+			ws.viaCF, ws.cfBase = true, base
 			return ws, nil
 		}
 		if ctx.Err() == nil {

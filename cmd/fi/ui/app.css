@@ -1,4 +1,4 @@
-/* Токены — из design/build.mjs. Тёмная тема основная, светлая — вместе с системной. */
+/* Токены — из docs/design/build.mjs. Тёмная тема основная, светлая — вместе с системной. */
 :root {
   color-scheme: dark;
   --bg: #0B0A0D;
@@ -130,6 +130,8 @@ main::-webkit-scrollbar-thumb { background: var(--line-strong); border-radius: 4
 .hint { margin-top: auto; font-size: 12px; line-height: 17px; color: var(--text-3); text-wrap: pretty; }
 .hint.center { margin-top: 0; text-align: center; }
 .field-error { font-size: 12px; line-height: 17px; color: var(--red-text); padding-left: 2px; }
+.notice-line { display: flex; align-items: flex-start; gap: 6px; font-size: 12px; line-height: 17px; color: var(--violet-text); padding-left: 2px; overflow-wrap: anywhere; }
+.notice-line svg { flex: none; margin-top: 1px; }
 .empty { padding: 16px 14px; font-size: 12.5px; color: var(--text-2); }
 .grid-2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
 
@@ -306,6 +308,7 @@ main::-webkit-scrollbar-thumb { background: var(--line-strong); border-radius: 4
 .result-text { font-size: 12.5px; line-height: 18px; color: var(--text-2); text-wrap: pretty; }
 .result-meta { font-size: 12px; color: var(--text-3); }
 .notice { display: flex; align-items: center; gap: 10px; padding: 16px; color: var(--text-2); }
+.notice > svg { flex: none; }
 
 /* Панель с overflow: hidden во flex-колонке сжимается и обрезает содержимое — пусть лучше прокручивается окно. */
 main > .panel { flex: none; }

@@ -16,8 +16,12 @@ func TestLoadSave(t *testing.T) {
 
 	c.Strategy = "general (ALT2)"
 	now := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
-	if !c.AddSite("x.com", "DPI", now) || c.AddSite("x.com", "", now) {
+	if !c.AddSite(Site{Host: "x.com", Added: now, Note: "DPI"}) || c.AddSite(Site{Host: "x.com", Added: now}) {
 		t.Fatal("AddSite должен отклонять повтор")
+	}
+	c.AddSite(Site{Host: "twimg.com", Added: now, Parent: "x.com"})
+	if main := c.MainSites(); len(main) != 1 || main[0] != "x.com" || len(c.SiteHosts()) != 2 {
+		t.Fatalf("основные сайты %v, все %v", main, c.SiteHosts())
 	}
 	if err := Save(path, c); err != nil {
 		t.Fatal(err)
@@ -34,6 +38,6 @@ func TestLoadSave(t *testing.T) {
 	}
 
 	if !got.RemoveSite("x.com") || got.RemoveSite("x.com") || len(got.SiteHosts()) != 0 {
-		t.Error("RemoveSite")
+		t.Error("RemoveSite должен убрать сайт вместе со связанными доменами")
 	}
 }

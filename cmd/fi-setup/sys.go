@@ -23,6 +23,7 @@ import (
 const (
 	mbOK          = 0x0
 	mbYesNo       = 0x4
+	mbDefButton2  = 0x100
 	iconError     = 0x10
 	iconQuestion  = 0x20
 	iconWarning   = 0x30
@@ -39,6 +40,11 @@ func messageBox(text string, flags uint32) int32 {
 }
 
 func ask(text string) bool { return messageBox(text, mbYesNo|iconQuestion) == idYes }
+
+// askNo — вопрос, где по умолчанию выбрано «Нет»: для необратимых действий.
+func askNo(text string) bool {
+	return messageBox(text, mbYesNo|mbDefButton2|iconQuestion) == idYes
+}
 
 func inform(text string, icon uint32) { messageBox(text, mbOK|icon) }
 

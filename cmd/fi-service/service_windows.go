@@ -12,6 +12,8 @@ import (
 
 	"golang.org/x/sys/windows/svc"
 	"golang.org/x/sys/windows/svc/mgr"
+
+	"fi/internal/logfile"
 )
 
 const serviceName = "FI"
@@ -70,17 +72,9 @@ func (s *service) Execute(_ []string, requests <-chan svc.ChangeRequest, changes
 	}
 }
 
-// openLog открывает журнал службы; при переполнении старый журнал сохраняется рядом.
-func openLog() (*os.File, *slog.Logger) {
-	dir := dataDir()
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return nil, slog.New(slog.NewTextHandler(io.Discard, nil))
-	}
-	path := filepath.Join(dir, "fi-service.log")
-	if fi, err := os.Stat(path); err == nil && fi.Size() > 5<<20 {
-		os.Rename(path, path+".old")
-	}
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+// openLog открывает журнал службы; переполненный журнал сохраняется рядом как .old.
+func openLog() (*logfile.File, *slog.Logger) {
+	f, err := logfile.Open(filepath.Join(dataDir(), "fi-service.log"), logfile.MaxSize)
 	if err != nil {
 		return nil, slog.New(slog.NewTextHandler(io.Discard, nil))
 	}

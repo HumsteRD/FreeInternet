@@ -17,3 +17,5 @@ func StartBFE() error { return errUnsupported }
 func UnloadWinDivert() error { return errUnsupported }
 
 func StopBypass(uint32) ([]string, error) { return nil, errUnsupported }
+
+func InternetVPN() string { return "" }

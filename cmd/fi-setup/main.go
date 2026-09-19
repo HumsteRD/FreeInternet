@@ -202,6 +202,30 @@ func runInstall(quiet, update bool) error {
 	return nil
 }
 
+// userFiles — файлы в папке данных, которые принадлежат человеку и переживают удаление FI.
+var userFiles = []string{"config.json"}
+
+// removeData удаляет папку данных FI; keep — оставить настройки человека.
+func removeData(keep bool) (pending bool, err error) {
+	if !keep {
+		return winsvc.RemoveTree(dataDir())
+	}
+	entries, err := os.ReadDir(dataDir())
+	if err != nil {
+		return false, nil
+	}
+	var errs []error
+	for _, e := range entries {
+		if slices.Contains(userFiles, e.Name()) {
+			continue
+		}
+		p, err := winsvc.RemoveTree(filepath.Join(dataDir(), e.Name()))
+		pending = pending || p
+		errs = append(errs, err)
+	}
+	return pending, errors.Join(errs...)
+}
+
 func runUninstall(quiet bool) error {
 	if !quiet && !ask("Удалить FI? Служба обхода блокировок будет остановлена и удалена.") {
 		return nil
@@ -223,16 +247,20 @@ func runUninstall(quiet bool) error {
 	}
 	registry.DeleteKey(registry.LOCAL_MACHINE, winsvc.UninstallKey)
 
-	if !quiet && ask("Удалить также настройки FI и скачанный набор стратегий?\n\n"+dataDir()) {
+	if !quiet {
+		// Скачанное и временное удаляется всегда, а настройки человека — список сайтов, Telegram,
+		// игры — только по его прямому согласию: после повторной установки FI они вернутся.
+		keep := !askNo("Удалить и ваши настройки FI: список сайтов, настройки Telegram и игр?\n\n" +
+			"Нажмите «Нет», чтобы оставить их: после повторной установки FI всё вернётся.")
 		// Файл драйвера WinDivert занят, пока драйвер загружен, поэтому сначала выгружаем его.
 		winsvc.KillProcesses("winws.exe", 0)
 		winsvc.StopDriver("WinDivert")
 		winsvc.StopDriver("WinDivert14")
-		switch pending, err := winsvc.RemoveTree(dataDir()); {
+		switch pending, err := removeData(keep); {
 		case err != nil:
-			inform("Часть настроек удалить не удалось: "+err.Error(), iconWarning)
+			inform("Часть файлов FI удалить не удалось: "+err.Error(), iconWarning)
 		case pending:
-			inform("Настройки удалены. Несколько файлов были заняты системой — они исчезнут после перезагрузки.", iconInfo)
+			inform("Несколько файлов FI были заняты системой — они исчезнут после перезагрузки.", iconInfo)
 		}
 	}
 	if err := removeLater(installDir()); err != nil {

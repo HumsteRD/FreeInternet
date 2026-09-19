@@ -35,9 +35,10 @@ func (d *Duration) UnmarshalJSON(b []byte) error {
 
 // Site — сайт, добавленный пользователем в список обхода.
 type Site struct {
-	Host  string    `json:"host"`
-	Added time.Time `json:"added"`
-	Note  string    `json:"note,omitempty"` // что было не так, когда добавляли
+	Host   string    `json:"host"`
+	Added  time.Time `json:"added"`
+	Note   string    `json:"note,omitempty"`   // что было не так, когда добавляли
+	Parent string    `json:"parent,omitempty"` // домен добавлен вместе с этим сайтом: с него тот грузит музыку, видео, картинки
 }
 
 type Config struct {
@@ -111,7 +112,7 @@ func Save(path string, c Config) error {
 	return os.Rename(tmp, path)
 }
 
-// SiteHosts возвращает адреса пользовательских сайтов.
+// SiteHosts возвращает все адреса для списка обхода: сайты пользователя и домены, добавленные вместе с ними.
 func (c Config) SiteHosts() []string {
 	hosts := make([]string, len(c.Sites))
 	for i, s := range c.Sites {
@@ -120,18 +121,29 @@ func (c Config) SiteHosts() []string {
 	return hosts
 }
 
+// MainSites — сайты, которые добавил сам пользователь, без связанных доменов: их и проверяем.
+func (c Config) MainSites() []string {
+	var hosts []string
+	for _, s := range c.Sites {
+		if s.Parent == "" {
+			hosts = append(hosts, s.Host)
+		}
+	}
+	return hosts
+}
+
 // AddSite добавляет сайт; false — сайт уже в списке.
-func (c *Config) AddSite(host, note string, now time.Time) bool {
-	if slices.ContainsFunc(c.Sites, func(s Site) bool { return s.Host == host }) {
+func (c *Config) AddSite(site Site) bool {
+	if slices.ContainsFunc(c.Sites, func(s Site) bool { return s.Host == site.Host }) {
 		return false
 	}
-	c.Sites = append(c.Sites, Site{Host: host, Added: now, Note: note})
+	c.Sites = append(c.Sites, site)
 	return true
 }
 
-// RemoveSite удаляет сайт; false — такого сайта не было.
+// RemoveSite удаляет сайт вместе с доменами, добавленными ради него; false — такого сайта не было.
 func (c *Config) RemoveSite(host string) bool {
 	n := len(c.Sites)
-	c.Sites = slices.DeleteFunc(c.Sites, func(s Site) bool { return s.Host == host })
+	c.Sites = slices.DeleteFunc(c.Sites, func(s Site) bool { return s.Host == host || s.Parent == host })
 	return len(c.Sites) != n
 }

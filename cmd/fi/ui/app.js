@@ -90,6 +90,7 @@ const state = {
   copied: false, // ссылка прокси Telegram только что скопирована
   worker: null, // домен Cloudflare Worker, пока его правят в поле; null — показываем сохранённый
   tgClients: null, // клиенты Telegram на компьютере (Telegram, AyuGram…); null — ещё не искали
+  notice: '', // что получилось: «Отчёт сохранён…»; сбрасывается при переходе между экранами
 };
 
 const TITLES = { youtube: 'YouTube', discord: 'Discord', telegram: 'Telegram', calls: 'Звонки', sites: 'Сайты' };
@@ -141,6 +142,7 @@ const subHeader = (title) =>
   `<div class="subheader"><button class="icon-btn" data-action="back" aria-label="Назад">${icon('chevronLeft', 18)}</button><h1>${esc(title)}</h1></div>`;
 
 const errorLine = () => (state.message ? `<p class="field-error">${esc(state.message)}</p>` : '');
+const noticeLine = () => (state.notice ? `<p class="notice-line">${icon('check', 14, 2)}<span>${esc(state.notice)}</span></p>` : '');
 
 function baseLine(base = {}) {
   if (base.error) return base.error;
@@ -234,11 +236,14 @@ function heroView(st) {
   </section>`;
 }
 
+// routeText — каким путём прокси ходит в Telegram: «через Cloudflare», «напрямую».
+const routeText = (route) => (route === 'напрямую' ? route : `через ${route}`);
+
 function serviceRow(service, st) {
   const meta = SERVICE_META[service.id] ?? { icon: 'globe', sub: '' };
   let sub = meta.sub;
   if (service.id === 'sites') {
-    const n = st.sites?.length ?? 0;
+    const n = (st.sites ?? []).filter((s) => !s.parent).length;
     sub = n ? `${n} в списке` : 'Своих сайтов пока нет';
   }
   if (service.detail && service.state !== 'ok') sub = service.detail;
@@ -255,13 +260,15 @@ function serviceRow(service, st) {
       sub = tg.bad_secret ? 'В Telegram сохранён старый прокси FI — подключите заново' : 'Подключите Telegram или AyuGram к прокси';
       trailing = '<button class="btn sm primary" data-action="tg-connect">Подключить</button>';
     } else if (service.state === 'ok' || service.state === 'partial') {
-      sub = tg.active ? `Прокси · ${tg.active} ${plural(tg.active, 'соединение', 'соединения', 'соединений')} сейчас` : 'Прокси подключён';
+      const via = tg.route ? routeText(tg.route) : '';
+      const count = tg.active ? `${tg.active} ${plural(tg.active, 'соединение', 'соединения', 'соединений')}` : '';
+      sub = [via && via[0].toUpperCase() + via.slice(1), count].filter(Boolean).join(' · ') || 'Прокси подключён';
       [kind, label] = ['proxy', 'Через прокси'];
     }
   }
 
   // Причину поломки показываем целиком: в одну строку она не помещается и обрывается на полуслове.
-  const subClass = service.detail && service.state !== 'ok' ? 'row-sub wrap' : 'row-sub';
+  const subClass = (service.detail && service.state !== 'ok') || service.id === 'telegram' ? 'row-sub wrap' : 'row-sub';
   return `<div class="row">
     <span class="tile">${icon(meta.icon)}</span>
     <span class="row-text"><span class="row-title">${esc(service.title)}</span><span class="${subClass}" title="${esc(sub)}">${esc(sub)}</span></span>
@@ -274,8 +281,12 @@ function mainView(st) {
     ? st.services
     : Object.keys(TITLES).map((id) => ({ id, title: TITLES[id], state: 'pending' }));
   const checking = st.task?.kind === 'check';
+  const vpn = st.vpn
+    ? `<section class="panel notice">${icon('globe', 16)}<span>Интернет идёт через VPN (${esc(st.vpn)}): статусы показывают сеть VPN, а не провайдера, и автоподбор пока не запускается.</span></section>`
+    : '';
   return `${heroView(st)}
     ${errorLine()}
+    ${vpn}
     <section class="stack">
       <div class="section-label"><span>Сервисы</span></div>
       <div class="panel">${services.map((s) => serviceRow(s, st)).join('')}</div>
@@ -346,19 +357,33 @@ function siteView(st) {
   const result = s.result
     ? (() => {
         const [kind, label] = VERDICT_BADGE[s.result.verdict] ?? VERDICT_BADGE.unknown;
+        // Главная страница открывается, а музыка или видео на сайте — нет: такой сайт можно добавить вручную.
+        const force =
+          s.result.verdict === 'works'
+            ? `<p class="result-text">Если на сайте не играет музыка или не грузится видео, добавьте его всё равно — вместе с доменами, с которых он их берёт.</p>
+               <button class="btn sm primary" data-action="force-site" ${s.busy || st.task ? 'disabled' : ''}>Всё равно добавить</button>`
+            : '';
         return `<section class="panel result">
           <div class="result-head"><span class="mono strong">${esc(s.result.host)}</span>${badge(kind, label)}</div>
           <p class="result-text">${esc(s.result.message)}</p>
+          ${force}
         </section>`;
       })()
     : '';
-  const rows = sites
-    .map(
-      (site) => `<div class="row site-row">
-        <span class="row-text"><span class="mono">${esc(site.host)}</span>${site.note ? `<span class="row-sub">Было: ${esc(site.note)}</span>` : ''}</span>
+  // Домены, добавленные вместе с сайтом, показываем под ним: удаляются они тоже вместе.
+  const main = sites.filter((site) => !site.parent || !sites.some((p) => p.host === site.parent));
+  const rows = main
+    .map((site) => {
+      const related = sites.filter((c) => c.parent === site.host).map((c) => c.host);
+      const subs = [
+        site.note ? `<span class="row-sub">Было: ${esc(site.note)}</span>` : '',
+        related.length ? `<span class="row-sub wrap">Вместе с ним: <span class="mono">${esc(related.join(', '))}</span></span>` : '',
+      ].join('');
+      return `<div class="row site-row">
+        <span class="row-text"><span class="mono">${esc(site.host)}</span>${subs}</span>
         <button class="icon-btn" data-action="remove-site" data-host="${esc(site.host)}" title="Убрать из списка" aria-label="Убрать ${esc(site.host)} из списка">${icon('trash', 16)}</button>
-      </div>`,
-    )
+      </div>`;
+    })
     .join('');
 
   return `${subHeader('Добавить сайт')}
@@ -373,8 +398,14 @@ function siteView(st) {
     </form>
     ${result}
     <section class="stack">
-      <div class="section-label"><span>Ваши сайты</span><span>${sites.length || ''}</span></div>
+      <div class="section-label"><span>Ваши сайты</span><span>${main.length || ''}</span></div>
       <div class="panel">${rows || '<p class="empty">Пока пусто. Добавьте сайт, который не открывается.</p>'}</div>
+      ${errorLine()}
+      ${noticeLine()}
+      <div class="button-row">
+        <button class="btn sm" data-action="sites-export" ${sites.length ? '' : 'disabled'}>Сохранить в файл</button>
+        <button class="btn sm ghost" data-action="sites-import">Загрузить из файла</button>
+      </div>
     </section>
     <p class="hint">Можно и из трея: скопируйте адрес и выберите «Добавить сайт из буфера».</p>`;
 }
@@ -580,7 +611,7 @@ function settingsView(st) {
       <div class="section-label"><span>Обход</span></div>
       <div class="panel">
         <div class="settings-row">
-          <span class="row-text"><span class="row-title-sm">Чинить автоматически</span><span class="row-sub wrap">Если сервис перестал работать, подобрать стратегию заново</span></span>
+          <span class="row-text"><span class="row-title-sm">Чинить автоматически</span><span class="row-sub wrap">Если сервис перестал работать и через минуту это подтвердилось, подобрать стратегию заново. Пока включён VPN, не срабатывает.</span></span>
           <button class="toggle ${st.auto_fix ? 'on' : ''}" role="switch" aria-checked="${st.auto_fix}" aria-label="Чинить автоматически" data-action="auto-fix"></button>
         </div>
         <div class="settings-row column">
@@ -620,7 +651,7 @@ function settingsView(st) {
       <div class="panel">
         <div class="settings-row">
           <span class="row-text"><span class="row-title-sm">Прокси для Telegram и AyuGram</span><span class="row-sub">${
-            tg.enabled ? `<span class="mono">${esc(tg.address)}</span>${tg.error ? ' · не запущен' : ''}` : 'Выключен'
+            tg.enabled ? `<span class="mono">${esc(tg.address)}</span>${tg.error ? ' · не запущен' : tg.route ? ` · ${esc(routeText(tg.route))}` : ''}` : 'Выключен'
           }</span></span>
           <button class="toggle ${tg.enabled ? 'on' : ''}" role="switch" aria-checked="${Boolean(tg.enabled)}" aria-label="Прокси для Telegram" data-action="tg-toggle"></button>
         </div>
@@ -645,6 +676,19 @@ function settingsView(st) {
               </div>`
             : ''
         }
+      </div>
+    </section>
+    <section class="stack">
+      <div class="section-label"><span>Журнал и отчёт</span></div>
+      <div class="panel">
+        <div class="settings-row column">
+          <span class="row-text"><span class="row-title-sm">Если что-то не работает</span><span class="row-sub wrap">Отчёт собирает журналы, настройки и диагностику в один архив — его можно приложить к сообщению о проблеме. Ключ прокси Telegram в отчёт не попадает.</span></span>
+          <div class="button-row">
+            <button class="btn sm" data-action="report">Сохранить отчёт</button>
+            <button class="btn sm ghost" data-action="logs">Открыть папку журналов</button>
+          </div>
+          ${noticeLine()}
+        </div>
       </div>
     </section>
     <p class="hint">Стратегий в наборе: ${st.strategies}</p>`;
@@ -690,6 +734,7 @@ function render() {
 function go(screen) {
   state.screen = screen;
   state.message = '';
+  state.notice = '';
   if (screen === 'site') state.site = { ...state.site, result: null, error: '' };
   if (screen === 'diagnose') state.diagnose = { service: '', checking: false, report: null, fixing: '' };
   if (screen === 'settings') {
@@ -730,9 +775,11 @@ async function command(method, params) {
   schedule();
 }
 
-async function addSite() {
+// addSite проверяет и добавляет сайт из поля ввода; force — добавить тот, что открывается и без обхода.
+async function addSite(force = false) {
   const s = state.site;
-  if (!s.input.trim()) {
+  const host = force ? s.result?.host : s.input;
+  if (!host?.trim()) {
     s.error = 'Введите адрес сайта';
     render();
     return;
@@ -740,16 +787,29 @@ async function addSite() {
   s.busy = true;
   s.error = '';
   s.result = null;
+  state.notice = '';
   render();
   try {
-    s.result = await api('add_site', { host: s.input });
-    s.input = '';
+    s.result = await api('add_site', { host, force });
+    if (!force) s.input = '';
   } catch (err) {
     handleError(err, (m) => (s.error = m));
   } finally {
     s.busy = false;
   }
   await refresh();
+}
+
+// fileAction — действие с файлом через окно Windows: отчёт, сохранение и загрузка списка сайтов.
+async function fileAction(path, done) {
+  state.message = '';
+  state.notice = '';
+  const data = await postJSON(path);
+  if (!data) state.message = 'Окно потеряло связь со своей частью на Go';
+  else if (data.error) state.message = data.error;
+  else if (data.status) state.status = data.status;
+  if (data && !data.error) state.notice = done(data) ?? '';
+  render();
 }
 
 async function paste() {
@@ -921,6 +981,23 @@ document.addEventListener('click', (event) => {
       break;
     case 'game-mode':
       command('set_game_mode', { mode: el.dataset.mode });
+      break;
+    case 'force-site':
+      addSite(true);
+      break;
+    case 'sites-export':
+      fileAction('/app/sites/export', (d) => (d.path ? `Список сохранён: ${d.path}` : ''));
+      break;
+    case 'sites-import':
+      fileAction('/app/sites/import', (d) =>
+        d.added === undefined ? '' : d.added ? `Добавлено сайтов: ${d.added}` : 'Все сайты из файла уже были в списке',
+      );
+      break;
+    case 'report':
+      fileAction('/app/report', (d) => (d.path ? `Отчёт сохранён: ${d.path}` : ''));
+      break;
+    case 'logs':
+      fileAction('/app/logs', () => '');
       break;
     case 'remove-site':
       command('remove_site', { host: el.dataset.host });

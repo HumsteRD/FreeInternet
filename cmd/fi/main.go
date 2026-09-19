@@ -36,6 +36,7 @@ import (
 var uiFiles embed.FS
 
 func main() {
+	openTrayLog()
 	// После обновления новое окно ждёт, пока закроется прежнее, — иначе приняло бы себя за второй экземпляр.
 	for _, a := range os.Args[1:] {
 		if v, ok := strings.CutPrefix(a, "--wait-pid="); ok {
@@ -68,6 +69,10 @@ func main() {
 	mux.HandleFunc("POST /app/telegram/clients", t.handleTelegramClients)
 	mux.HandleFunc("POST /app/telegram/choose", t.handleTelegramChoose)
 	mux.HandleFunc("POST /app/diagnose", t.handleDiagnose)
+	mux.HandleFunc("POST /app/report", t.handleReport)
+	mux.HandleFunc("POST /app/logs", t.handleLogs)
+	mux.HandleFunc("POST /app/sites/export", t.handleSitesExport)
+	mux.HandleFunc("POST /app/sites/import", t.handleSitesImport)
 	mux.Handle("/", http.FileServerFS(ui))
 
 	t.notifier = notifications.New()

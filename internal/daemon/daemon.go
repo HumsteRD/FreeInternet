@@ -18,6 +18,7 @@ import (
 	"fi/internal/appupdate"
 	"fi/internal/autoselect"
 	"fi/internal/config"
+	"fi/internal/diag"
 	"fi/internal/engine"
 	"fi/internal/flowseal"
 	"fi/internal/lists"
@@ -36,7 +37,9 @@ const (
 	maxRestarts     = 3
 	restartWindow   = 10 * time.Minute
 	restartDelay    = 5 * time.Second
-	autoSelectPause = time.Hour // автоподбор не чаще: он на несколько минут прерывает интернет
+	autoSelectPause = time.Hour       // автоподбор не чаще: он на несколько минут прерывает интернет
+	retryDelay      = 5 * time.Second // пауза перед повторной проверкой упавших целей
+	confirmDelay    = time.Minute     // через сколько подтверждать поломку перед автоподбором
 )
 
 // Task — долгая операция, которую показывает окно.
@@ -62,6 +65,7 @@ type Status struct {
 	AutoFix      bool            `json:"auto_fix"`
 	Error        string          `json:"error,omitempty"`
 	Conflict     []string        `json:"conflict,omitempty"` // другие обходы, из-за которых движок не запущен
+	VPN          string          `json:"vpn,omitempty"`      // интернет идёт через этот VPN: проверки видят его сеть
 	Task         *Task           `json:"task,omitempty"`
 	Services     []Service       `json:"services"`
 	CheckedAt    time.Time       `json:"checked_at,omitzero"`
@@ -107,6 +111,9 @@ type Daemon struct {
 	latestChecked time.Time
 	updateErr     string
 
+	vpn     string // VPN-адаптер, через который шёл интернет при последней проверке
+	tgRoute string // каким путём прокси Telegram дошёл до Telegram при последней проверке
+
 	ytNode   string    // видеосервер YouTube этой сети
 	ytNodeAt time.Time // когда его узнавали
 
@@ -138,6 +145,7 @@ func New(dataDir string, log *slog.Logger) (*Daemon, error) {
 	}
 	d.strategies, d.base, d.baseErr = loadBase(cfg.BaseDir)
 	d.ensureTelegramSecret()
+	d.ensureFamilies()
 	d.loadCFCache()
 	return d, nil
 }
@@ -206,6 +214,7 @@ func (d *Daemon) Status() Status {
 		AutoFix:      d.cfg.AutoFix,
 		Services:     slices.Clone(d.services),
 		Conflict:     slices.Clone(d.conflict),
+		VPN:          d.vpn,
 		CheckedAt:    d.checkedAt,
 		Sites:        slices.Clone(d.cfg.Sites),
 	}
@@ -487,19 +496,82 @@ func (d *Daemon) preemptCheck() bool {
 
 func (d *Daemon) check(ctx context.Context) ([]Service, error) {
 	node := d.youtubeNode(ctx)
+	vpn := diag.InternetVPN()
 	d.mu.Lock()
-	targets := probe.WithYouTubeNode(checkTargets(d.cfg.SiteHosts()), node)
+	srv := d.tg
+	targets := probe.WithYouTubeNode(checkTargets(d.cfg.MainSites(), srv != nil), node)
 	d.mu.Unlock()
 
+	var tgResult probe.Result
+	var wg sync.WaitGroup
+	if srv != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			tgResult = d.telegramResult(ctx, srv)
+		}()
+	}
 	results := d.prober.Run(ctx, targets)
+	// Сбои бывают случайными: упавшие цели через несколько секунд проверяются ещё раз,
+	// и в окне остаётся второй результат.
+	if failed := failedTargets(results); len(failed) > 0 && ctx.Err() == nil {
+		select {
+		case <-time.After(retryDelay):
+			results = mergeRetry(results, d.prober.Run(ctx, failed))
+		case <-ctx.Done():
+		}
+	}
+	wg.Wait()
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	if srv != nil {
+		results = append(results, tgResult)
+	}
 	services := summarize(results)
+
 	d.mu.Lock()
+	prev := d.services
 	d.services, d.checkedAt = services, time.Now()
+	vpnChanged := vpn != d.vpn
+	d.vpn = vpn
 	d.mu.Unlock()
+	if vpnChanged {
+		if vpn != "" {
+			d.log.Info("интернет идёт через VPN — проверки показывают его сеть", "adapter", vpn)
+		} else {
+			d.log.Info("интернет снова идёт напрямую, без VPN")
+		}
+	}
+	for _, line := range changes(prev, services) {
+		d.log.Info("сервис", "state", line)
+	}
 	return services, nil
+}
+
+// telegramResult проверяет прокси для Telegram его собственными путями — так же, как
+// соединяются клиенты, в том числе через Cloudflare.
+func (d *Daemon) telegramResult(ctx context.Context, srv *tgproxy.Server) probe.Result {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	start := time.Now()
+	r := probe.Result{Target: probe.Target{Name: "Telegram: прокси", Group: "telegram", Kind: probe.KindWS, Weight: 2}}
+	route, err := srv.Probe(ctx)
+	if err != nil && ctx.Err() == nil {
+		// Одна неудача — ещё не поломка: общие домены Cloudflare иногда отвечают 503.
+		route, err = srv.Probe(ctx)
+	}
+	r.Duration = time.Since(start)
+	d.mu.Lock()
+	if err != nil {
+		r.Status, r.Detail = probe.TCPFail, err.Error()
+		d.tgRoute = ""
+	} else {
+		r.Status, r.Detail = probe.OK, route
+		d.tgRoute = route
+	}
+	d.mu.Unlock()
+	return r
 }
 
 // youtubeNode — видеосервер YouTube этой сети. Узнаём раз в сутки, после неудачи повторяем
@@ -566,11 +638,35 @@ func (d *Daemon) periodicCheck(ctx context.Context) {
 		}
 		return
 	}
-	if autoFix && regressed(prev, services) {
-		d.log.Info("сервис перестал работать — подбираю стратегию заново")
-		if err := d.startSelect(true); err != nil {
-			d.log.Warn("подбор не запущен", "err", err)
-		}
+	if !autoFix || !regressed(prev, services) {
+		return
+	}
+	// Подбор на минуту прерывает интернет, поэтому сначала убеждаемся, что поломка не случайная.
+	d.log.Info("похоже, сервис перестал работать — перепроверю через минуту")
+	select {
+	case <-time.After(confirmDelay):
+	case <-ctx.Done():
+		return
+	}
+	services, err = d.Check(ctx)
+	switch {
+	case err != nil:
+		return
+	case !regressed(prev, services):
+		d.log.Info("сбой был временным — подбор не нужен")
+		return
+	}
+	d.mu.Lock()
+	vpn := d.vpn
+	d.mu.Unlock()
+	if vpn != "" {
+		// Через VPN проверки видят не сеть провайдера: подбор по ним ничего не исправит.
+		d.log.Info("сервис не работает, но интернет идёт через VPN — подбор не запускаю", "adapter", vpn)
+		return
+	}
+	d.log.Info("сервис перестал работать — подбираю стратегию заново")
+	if err := d.startSelect(true); err != nil {
+		d.log.Warn("подбор не запущен", "err", err)
 	}
 }
 
@@ -607,7 +703,7 @@ func (d *Daemon) startSelect(quick bool) error {
 		GameMode: d.cfg.GameMode,
 		Games:    d.cfg.Games,
 		Ipset:    d.cfg.Ipset,
-		Targets:  selectTargets(d.cfg.SiteHosts()),
+		Targets:  selectTargets(d.cfg.MainSites()),
 		Prober:   d.prober,
 		OnStart:  func(i, total int, name string) { d.progress(i, total, name) },
 	}

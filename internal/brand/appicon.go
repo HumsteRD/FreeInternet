@@ -1,4 +1,4 @@
-// Package brand рисует значок приложения по геометрии из дизайна (design/build.mjs: appIcon,
+// Package brand рисует значок приложения по геометрии из дизайна (docs/design/build.mjs: appIcon,
 // markSimple, mark16): «П» с узким красным просветом на тёмной плитке.
 package brand
 

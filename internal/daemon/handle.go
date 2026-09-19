@@ -16,7 +16,8 @@ func (d *Daemon) Handle(ctx context.Context, method string, params json.RawMessa
 		On bool `json:"on"`
 	}
 	var host struct {
-		Host string `json:"host"`
+		Host  string `json:"host"`
+		Force bool   `json:"force"` // добавить, даже если сайт открывается
 	}
 
 	var err error
@@ -50,11 +51,23 @@ func (d *Daemon) Handle(ctx context.Context, method string, params json.RawMessa
 		}
 		siteCtx, cancel := context.WithTimeout(ctx, 3*time.Minute)
 		defer cancel()
-		res, err := d.AddSite(siteCtx, host.Host)
+		res, err := d.AddSite(siteCtx, host.Host, host.Force)
 		if err == nil && res.Added {
 			d.recheckSoon() // иначе плитка «Сайты» до следующей проверки показывает «Пусто»
 		}
 		return res, err
+	case "import_sites":
+		var p struct {
+			Sites []ImportEntry `json:"sites"`
+		}
+		if err := decode(params, &p); err != nil {
+			return nil, err
+		}
+		added, err := d.ImportSites(p.Sites)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"added": added, "status": d.Status()}, nil
 	case "remove_site":
 		if err = decode(params, &host); err == nil {
 			if err = d.RemoveSite(host.Host); err == nil {

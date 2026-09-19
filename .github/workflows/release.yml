@@ -1,0 +1,42 @@
+# Выпуск версии: тег vX.Y.Z → тесты, сборка и установщик fi-setup.exe в разделе Releases.
+#   git tag v0.2.0 && git push origin v0.2.0
+name: Выпуск
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Тесты
+        run: go test ./...
+
+      - name: Сборка
+        shell: pwsh
+        run: ./scripts/build.ps1 -Version "${{ github.ref_name }}".TrimStart("v")
+
+      - name: Релиз
+        uses: softprops/action-gh-release@v2
+        with:
+          files: build/fi-setup.exe
+          body: |
+            ## Установка
+            1. Скачайте **fi-setup.exe** ниже и запустите.
+            2. Windows может предупредить о неизвестном издателе: «Подробнее» → «Выполнить в любом случае».
+               Установщик не подписан сертификатом — это платная услуга; исходники открыты здесь же.
+            3. После установки значок FI появится в трее. Окно предложит скачать набор стратегий и подобрать лучшую.
+
+            Обновить FI — запустить установщик новой версии поверх старой.
+            Удалить — «Параметры → Приложения → FI». Ваш список сайтов и настройки при этом остаются, если не выбрать их удаление.
+          generate_release_notes: true

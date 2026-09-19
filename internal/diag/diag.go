@@ -166,17 +166,25 @@ func looksLikeVPN(text string) bool {
 	return slices.ContainsFunc(vpnWords, func(w string) bool { return strings.Contains(text, w) })
 }
 
+// vpnAdapter — VPN-адаптер, через который идёт интернет; nil — интернет идёт напрямую.
+func vpnAdapter(list []Adapter, internetIf uint32) *Adapter {
+	for i, a := range list {
+		if internetIf != 0 && a.Index == internetIf && (looksLikeVPN(a.Name) || looksLikeVPN(a.Description)) {
+			return &list[i]
+		}
+	}
+	return nil
+}
+
 func checkVPN(s Snapshot) Finding {
 	f := Finding{ID: "vpn", Level: LevelOK, Title: "Интернет идёт не через VPN"}
-	for _, a := range s.Adapters {
-		if s.InternetIf != 0 && a.Index == s.InternetIf && (looksLikeVPN(a.Name) || looksLikeVPN(a.Description)) {
-			f.Level, f.Title, f.Detail = LevelWarn, "Интернет идёт через VPN", a.Name
-			if a.Description != "" && a.Description != a.Name {
-				f.Detail += " (" + a.Description + ")"
-			}
-			f.Advice = "Пока VPN включён, сайты открываются через него: проверки FI видят сеть VPN, а не провайдера, и подбирать стратегию бессмысленно. Выключите VPN, чтобы проверить обход."
-			return f
+	if a := vpnAdapter(s.Adapters, s.InternetIf); a != nil {
+		f.Level, f.Title, f.Detail = LevelWarn, "Интернет идёт через VPN", a.Name
+		if a.Description != "" && a.Description != a.Name {
+			f.Detail += " (" + a.Description + ")"
 		}
+		f.Advice = "Пока VPN включён, сайты открываются через него: проверки FI видят сеть VPN, а не провайдера, и подбирать стратегию бессмысленно. Выключите VPN, чтобы проверить обход."
+		return f
 	}
 	vpns := s.running(func(name, display string) bool {
 		return strings.Contains(name, "vpn") || strings.Contains(display, "vpn")

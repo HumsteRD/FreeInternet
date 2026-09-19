@@ -39,8 +39,10 @@ type wsConn struct {
 	conn      net.Conn
 	br        *bufio.Reader
 	raw       bool
-	viaWorker bool // соединение прошло через Cloudflare Worker пользователя
-	viaCF     bool // через общий домен Cloudflare
+	viaWorker bool   // соединение прошло через Cloudflare Worker пользователя
+	viaCF     bool   // через общий домен Cloudflare
+	host      string // домен, к которому открыт WebSocket
+	cfBase    string // общий домен Cloudflare, если соединение через него
 	wmu       sync.Mutex
 }
 
@@ -105,7 +107,7 @@ func dialWS(ctx context.Context, addr, host, path string) (*wsConn, error) {
 		return nil, errors.New("сервер WebSocket ответил неверным ключом")
 	}
 	conn.SetDeadline(time.Time{})
-	return &wsConn{conn: conn, br: br}, nil
+	return &wsConn{conn: conn, br: br, host: host}, nil
 }
 
 func acceptKey(key string) string {

@@ -62,6 +62,7 @@ type Stats struct {
 	Direct     int       `json:"direct"`     // напрямую по TCP
 	Failed     int       `json:"failed"`
 	BadSecret  int       `json:"bad_secret"` // клиенты с чужим секретом: в Telegram сохранён старый прокси
+	BadDC      int       `json:"bad_dc"`     // ответов «неверный дата-центр» (-444), не переданных клиенту
 	LastError  string    `json:"last_error,omitempty"`
 	LastActive time.Time `json:"last_active,omitzero"`
 }
@@ -82,6 +83,7 @@ type Server struct {
 	pool     *pool
 	failed   map[string]time.Time
 	dnsCache map[string]dnsEntry
+	logged   map[string]*logEntry // когда какая ошибка попала в журнал
 
 	cfMu          sync.Mutex
 	cfList        []string       // общие домены Cloudflare
@@ -220,11 +222,12 @@ func (s *Server) handle(ctx context.Context, client net.Conn) {
 	if err := up.send(relayInit); err != nil {
 		return
 	}
-	bridge(client, up, crypto, ci.proto)
+	bridge(client, up, crypto, ci.proto, func() { s.noteBadDC(dc, ci.media, up) })
 }
 
 // bridge перешифровывает трафик в обе стороны, пока одна из сторон не закроется.
-func bridge(client net.Conn, up upstream, c *cryptoCtx, proto uint32) {
+// onBadDC вызывается, когда Telegram прислал код -444: соединение тогда закрывается.
+func bridge(client net.Conn, up upstream, c *cryptoCtx, proto uint32, onBadDC func()) {
 	done := make(chan struct{}, 2)
 	go func() { // клиент → Telegram
 		defer func() { done <- struct{}{} }()
@@ -261,12 +264,18 @@ func bridge(client net.Conn, up upstream, c *cryptoCtx, proto uint32) {
 	}()
 	go func() { // Telegram → клиент
 		defer func() { done <- struct{}{} }()
+		w := &watcher{proto: proto}
 		for {
 			data, err := up.recv()
 			if len(data) > 0 {
 				c.tgDec.XORKeyStream(data, data)
+				data, bad := w.scan(data)
 				c.clientEnc.XORKeyStream(data, data)
 				if _, werr := client.Write(data); werr != nil {
+					return
+				}
+				if bad {
+					onBadDC()
 					return
 				}
 			}
@@ -279,6 +288,38 @@ func bridge(client net.Conn, up upstream, c *cryptoCtx, proto uint32) {
 	client.Close()
 	up.close()
 	<-done
+}
+
+// Probe проверяет, доходит ли прокси до Telegram: открывает соединение с дата-центром 2
+// теми же путями, что и для клиентов, но мимо пула и счётчиков, и сразу закрывает его.
+// Возвращает, каким путём прошло соединение.
+func (s *Server) Probe(ctx context.Context) (string, error) {
+	up, err := s.dialUpstream(ctx, poolKey{dc: 2})
+	if err == nil {
+		up.close()
+		return routeName(up), nil
+	}
+	d := net.Dialer{Timeout: dialTimeout}
+	conn, derr := d.DialContext(ctx, "tcp4", net.JoinHostPort(dcIPs[2], "443"))
+	if derr != nil {
+		return "", errors.Join(err, fmt.Errorf("напрямую %s: %w", dcIPs[2], derr))
+	}
+	conn.Close()
+	return routeName(nil), nil
+}
+
+// routeName — каким путём идёт соединение с Telegram, для окна и журнала.
+func routeName(up upstream) string {
+	w, ok := up.(*wsConn)
+	switch {
+	case !ok:
+		return "напрямую"
+	case w.viaWorker:
+		return "свой воркер"
+	case w.viaCF:
+		return "Cloudflare"
+	}
+	return "веб-версию Telegram"
 }
 
 // connect подключается к дата-центру: готовое соединение из пула, новый WebSocket веб-версии
@@ -539,6 +580,30 @@ func (s *Server) countWorker(up upstream) {
 	}
 }
 
+// noteBadDC отмечает, что Telegram ответил кодом -444 через этот путь. Код клиенту не передан,
+// соединение закрыто; общий домен Cloudflare, через который он пришёл, отдыхает.
+func (s *Server) noteBadDC(dc int, media bool, up upstream) {
+	route := "напрямую"
+	if w, ok := up.(*wsConn); ok {
+		switch {
+		case w.viaWorker:
+			route = "воркер " + w.host
+		case w.viaCF:
+			route = "Cloudflare " + w.host
+			s.markFailed("cf@" + w.cfBase)
+		default:
+			route = "WebSocket " + w.host
+		}
+	}
+	s.mu.Lock()
+	s.stats.BadDC++
+	s.mu.Unlock()
+	if s.Log != nil {
+		s.Log.Warn("Telegram ответил «неверный дата-центр» (-444): соединение закрыто, чтобы клиент не отключил прокси",
+			"dc", dc, "media", media, "route", route)
+	}
+}
+
 func isViaCF(up upstream) bool {
 	w, ok := up.(*wsConn)
 	return ok && w.viaCF
@@ -559,13 +624,44 @@ func (s *Server) count(websocket, pooled bool) {
 }
 
 func (s *Server) setError(err error) {
+	msg := err.Error()
+	now := time.Now()
 	s.mu.Lock()
 	s.stats.Failed++
-	s.stats.LastError = err.Error()
+	s.stats.LastError = msg
+	// Одинаковые ошибки идут очередями (клиент со старым секретом стучится десятки раз
+	// в секунду): в журнал такая попадает не чаще раза в минуту, с числом пропущенных.
+	if s.logged == nil || len(s.logged) > 200 {
+		s.logged = map[string]*logEntry{}
+	}
+	e := s.logged[msg]
+	if e != nil && now.Sub(e.at) < logEvery {
+		e.skipped++
+		s.mu.Unlock()
+		return
+	}
+	skipped := 0
+	if e != nil {
+		skipped = e.skipped
+	}
+	s.logged[msg] = &logEntry{at: now}
 	s.mu.Unlock()
-	if s.Log != nil {
+	if s.Log == nil {
+		return
+	}
+	if skipped > 0 {
+		s.Log.Warn("прокси Telegram", "err", err, "repeats", skipped)
+	} else {
 		s.Log.Warn("прокси Telegram", "err", err)
 	}
+}
+
+// logEvery — одна и та же ошибка прокси попадает в журнал не чаще.
+const logEvery = time.Minute
+
+type logEntry struct {
+	at      time.Time
+	skipped int // сколько раз ошибка повторилась, не попав в журнал
 }
 
 // tcpUpstream — прямое соединение с дата-центром.

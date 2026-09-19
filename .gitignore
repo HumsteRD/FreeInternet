@@ -19,9 +19,9 @@
 # Отчёты стенда
 /reports/
 
-# Дизайн: собранный холст и временные превью (исходники — design/build.mjs и design/artboards)
-/design/*-interface.html
-/design/.preview/
+# Дизайн: собранный холст и временные превью (исходники — docs/design/build.mjs и docs/design/artboards)
+/docs/design/*-interface.html
+/docs/design/.preview/
 
 # Frontend
 node_modules/

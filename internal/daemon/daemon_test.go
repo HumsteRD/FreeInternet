@@ -1,9 +1,13 @@
 package daemon
 
 import (
+	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
+	"time"
 
 	"fi/internal/config"
 	"fi/internal/probe"
@@ -142,5 +146,80 @@ func TestTelegramSecretStable(t *testing.T) {
 	}
 	if r1, r2 := telegramSecret(""), telegramSecret(""); len(r1) != 16 || string(r1) == string(r2) {
 		t.Fatalf("без идентификатора секрет должен быть случайным: %x и %x", r1, r2)
+	}
+}
+
+func TestMergeRetryKeepsSecondOpinion(t *testing.T) {
+	site := probe.Target{Name: "Discord: сайт", Group: "discord", Host: "discord.com"}
+	cdn := probe.Target{Name: "Discord: CDN", Group: "discord", Host: "cdn.discordapp.com"}
+	first := []probe.Result{{Target: site, Status: probe.TCPFail}, {Target: cdn, Status: probe.OK}}
+	again := []probe.Result{{Target: site, Status: probe.OK}}
+	if failed := failedTargets(first); len(failed) != 1 || failed[0] != site {
+		t.Fatalf("перепроверять нужно только сайт: %v", failed)
+	}
+	merged := mergeRetry(first, again)
+	if merged[0].Status != probe.OK || merged[1].Status != probe.OK || first[0].Status != probe.TCPFail {
+		t.Fatalf("повторная проверка не подставлена или испорчен исходный срез: %v / %v", merged, first)
+	}
+}
+
+func TestCheckTargetsWithTelegramProxy(t *testing.T) {
+	for _, tg := range checkTargets(nil, true) {
+		if tg.Group == "telegram" {
+			t.Fatalf("при работающем прокси Telegram проверяется через него, а не %s", tg.Name)
+		}
+	}
+	found := false
+	for _, tg := range checkTargets(nil, false) {
+		found = found || tg.Group == "telegram"
+	}
+	if !found {
+		t.Fatal("без прокси Telegram проверяется по сайту")
+	}
+}
+
+func TestChangesForLog(t *testing.T) {
+	prev := []Service{{ID: "youtube", Title: "YouTube", State: StateOK}, {ID: "discord", Title: "Discord", State: StateOK}}
+	cur := []Service{{ID: "youtube", Title: "YouTube", State: StateOK}, {ID: "discord", Title: "Discord", State: StatePartial, Detail: "Сайт: сервер недоступен"}}
+	got := changes(prev, cur)
+	if len(got) != 1 || got[0] != "Discord: работает → частично (Сайт: сервер недоступен)" {
+		t.Fatalf("изменения: %q", got)
+	}
+}
+
+func TestSiteFamilies(t *testing.T) {
+	got := familyOf("m.soundcloud.com")
+	if !slices.Contains(got, "sndcdn.com") || !slices.Contains(got, "soundcloud.cloud") || slices.Contains(got, "soundcloud.com") {
+		t.Fatalf("семейство SoundCloud: %v", got)
+	}
+	if familyOf("example.org") != nil {
+		t.Fatal("у неизвестного сайта семейства нет")
+	}
+	for _, c := range []struct {
+		host, related string
+		want          bool
+	}{
+		{"soundcloud.com", "soundcloud.cloud", true},
+		{"discord.com", "discordapp.net", true},
+		{"x.com", "xvideos.com", false}, // короткое имя ни с чем не сравниваем
+		{"soundcloud.com", "google.com", false},
+	} {
+		if got := sameBrand(c.host, c.related); got != c.want {
+			t.Errorf("sameBrand(%s, %s) = %v", c.host, c.related, got)
+		}
+	}
+}
+
+func TestEnsureFamiliesMigrates(t *testing.T) {
+	d := &Daemon{dataDir: t.TempDir(), log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	now := time.Now()
+	d.cfg.AddSite(config.Site{Host: "soundcloud.com", Added: now})
+	d.cfg.AddSite(config.Site{Host: "cdn.example.net", Added: now, Note: "нужен для soundcloud.com"})
+	d.ensureFamilies()
+	if main := d.cfg.MainSites(); len(main) != 1 || main[0] != "soundcloud.com" {
+		t.Fatalf("старый связанный домен не получил родителя: %v", main)
+	}
+	if hosts := d.cfg.SiteHosts(); !slices.Contains(hosts, "soundcloud.cloud") || !slices.Contains(hosts, "sndcdn.com") {
+		t.Fatalf("семейство не добавлено к уже сохранённому сайту: %v", hosts)
 	}
 }

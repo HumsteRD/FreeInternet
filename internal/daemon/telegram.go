@@ -25,6 +25,7 @@ type TelegramStatus struct {
 	Address string `json:"address"`
 	Link    string `json:"link,omitempty"`   // tg://proxy — открывает настройку в Telegram Desktop
 	Worker  string `json:"worker,omitempty"` // домен Cloudflare Worker, если задан
+	Route   string `json:"route,omitempty"`  // каким путём прокси дошёл до Telegram при последней проверке
 	// SharedCF — включены общие домены Cloudflare (tg-ws-proxy); CFDomains — сколько их известно.
 	SharedCF  bool   `json:"shared_cf"`
 	CFDomains int    `json:"cf_domains"`
@@ -66,6 +67,7 @@ func (d *Daemon) telegramStatusLocked() TelegramStatus {
 		Enabled:   d.cfg.Telegram.Enabled,
 		Address:   telegramAddr(d.cfg.Telegram.Port),
 		Worker:    d.cfg.Telegram.Worker,
+		Route:     d.tgRoute,
 		SharedCF:  d.cfg.Telegram.SharedCF,
 		CFDomains: len(d.tgCF),
 		Error:     d.tgErr,

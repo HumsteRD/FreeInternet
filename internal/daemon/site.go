@@ -2,8 +2,10 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"net/http"
 	"regexp"
@@ -14,6 +16,7 @@ import (
 	"golang.org/x/net/idna"
 	"golang.org/x/net/publicsuffix"
 
+	"fi/internal/config"
 	"fi/internal/lists"
 	"fi/internal/probe"
 )
@@ -30,8 +33,9 @@ type SiteResult struct {
 }
 
 // AddSite проверяет сайт при текущем обходе. Если провайдер мешает соединению,
-// сайт попадает в список обхода и проверяется снова.
-func (d *Daemon) AddSite(ctx context.Context, input string) (SiteResult, error) {
+// сайт попадает в список обхода и проверяется снова. force — добавить, даже если сайт
+// открывается: главная страница бывает доступна, а музыка или видео на нём — нет.
+func (d *Daemon) AddSite(ctx context.Context, input string, force bool) (SiteResult, error) {
 	host, err := NormalizeHost(input)
 	if err != nil {
 		return SiteResult{}, err
@@ -49,16 +53,19 @@ func (d *Daemon) AddSite(ctx context.Context, input string) (SiteResult, error) 
 	res := SiteResult{Host: host, Before: before.Status}
 	action := siteActionFor(before.Status)
 	res.Verdict, res.Message = action.verdict, action.message
-	if !action.add {
+	opens := before.Status == probe.OK || before.Status == probe.Slow
+	if !action.add && !(force && opens) {
 		return res, nil
+	}
+	note := describe(before.Status)
+	if opens {
+		note = "добавлен вручную"
 	}
 
 	d.mu.Lock()
-	d.cfg.AddSite(host, describe(before.Status), time.Now())
-	err = lists.WriteUserHosts(d.listsDir(), d.bypassHostsLocked())
-	if err == nil {
-		err = d.saveLocked()
-	}
+	d.cfg.AddSite(config.Site{Host: host, Added: time.Now(), Note: note})
+	family := d.addFamilyLocked(host)
+	err = d.saveSitesLocked()
 	running := d.proc != nil
 	d.mu.Unlock()
 	if err != nil {
@@ -66,30 +73,118 @@ func (d *Daemon) AddSite(ctx context.Context, input string) (SiteResult, error) 
 	}
 	res.Added = true
 
-	if !running {
+	switch {
+	case opens:
+		res.Verdict, res.Message = "added", "Сайт добавлен в список обхода."
+	case !running:
 		res.Verdict, res.Message = "added", "Сайт добавлен в список. Он заработает, когда обход будет включён."
-		return res, nil
-	}
-	// winws перечитывает список при следующем соединении, если изменилось время файла.
-	select {
-	case <-time.After(time.Second):
-	case <-ctx.Done():
-		return res, ctx.Err()
-	}
-	after := d.prober.Check(ctx, target)
-	res.After = after.Status
-	if after.Status == probe.OK || after.Status == probe.Slow {
-		res.Verdict, res.Message = "fixed", "Сайт добавлен в список обхода и открывается."
-	} else {
-		res.Verdict = "not_fixed"
-		res.Message = "Сайт добавлен, но текущая стратегия его не открывает (" + describe(after.Status) + "). Попробуйте подобрать стратегию заново."
+	default:
+		// winws перечитывает список при следующем соединении, если изменилось время файла.
+		select {
+		case <-time.After(time.Second):
+		case <-ctx.Done():
+			return res, ctx.Err()
+		}
+		after := d.prober.Check(ctx, target)
+		res.After = after.Status
+		if after.Status == probe.OK || after.Status == probe.Slow {
+			res.Verdict, res.Message = "fixed", "Сайт добавлен в список обхода и открывается."
+		} else {
+			res.Verdict = "not_fixed"
+			res.Message = "Сайт добавлен, но текущая стратегия его не открывает (" + describe(after.Status) + "). Попробуйте подобрать стратегию заново."
+		}
 	}
 
-	// Сайт открылся, но музыка, видео и картинки часто идут с других доменов — их тоже добавим.
-	if res.Related = d.addRelated(ctx, host); len(res.Related) > 0 {
-		res.Message += " Заодно добавлены домены, с которых сайт грузит содержимое: " + strings.Join(res.Related, ", ") + "."
+	// Музыка, видео и картинки часто идут с других доменов — их тоже добавим.
+	res.Related = append(family, d.addRelated(ctx, host)...)
+	if len(res.Related) > 0 {
+		res.Message += " Вместе с ним добавлены домены, с которых сайт грузит содержимое: " + strings.Join(res.Related, ", ") + "."
 	}
 	return res, nil
+}
+
+// addFamilyLocked добавляет известные домены сервиса (siteFamilies) вместе с сайтом host.
+func (d *Daemon) addFamilyLocked(host string) []string {
+	var added []string
+	for _, h := range familyOf(host) {
+		if d.cfg.AddSite(config.Site{Host: h, Added: time.Now(), Parent: host}) {
+			added = append(added, h)
+		}
+	}
+	return added
+}
+
+// saveSitesLocked обновляет список обхода и сохраняет настройки после изменения сайтов.
+func (d *Daemon) saveSitesLocked() error {
+	if err := lists.WriteUserHosts(d.listsDir(), d.bypassHostsLocked()); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	return d.saveLocked()
+}
+
+// ensureFamilies дополняет уже добавленные сайты известными доменами сервиса и помечает
+// связанные домены, добавленные прежними версиями, — при запуске службы.
+func (d *Daemon) ensureFamilies() {
+	changed := false
+	for i, s := range d.cfg.Sites {
+		if parent, ok := strings.CutPrefix(s.Note, "нужен для "); ok && s.Parent == "" {
+			d.cfg.Sites[i].Parent, d.cfg.Sites[i].Note = parent, ""
+			changed = true
+		}
+	}
+	for _, host := range d.cfg.MainSites() {
+		if added := d.addFamilyLocked(host); len(added) > 0 {
+			d.log.Info("к сайту добавлены домены сервиса", "site", host, "hosts", strings.Join(added, ", "))
+			changed = true
+		}
+	}
+	if changed {
+		if err := d.saveLocked(); err != nil {
+			d.log.Warn("настройки не сохранены", "err", err)
+		}
+	}
+}
+
+// ImportEntry — строка списка сайтов из файла.
+type ImportEntry struct {
+	Host   string `json:"host"`
+	Parent string `json:"parent,omitempty"` // домен добавлен вместе с этим сайтом
+}
+
+// ImportSites добавляет сайты из файла без проверки — например, список, сохранённый раньше.
+// Возвращает, сколько сайтов добавлено.
+func (d *Daemon) ImportSites(entries []ImportEntry) (int, error) {
+	d.mu.Lock()
+	added := 0
+	for _, e := range entries {
+		host, err := NormalizeHost(e.Host)
+		if err != nil {
+			continue
+		}
+		site := config.Site{Host: host, Added: time.Now(), Note: "из файла"}
+		if parent, err := NormalizeHost(e.Parent); err == nil && e.Parent != "" {
+			site.Parent, site.Note = parent, ""
+		}
+		if d.cfg.AddSite(site) {
+			added++
+			if site.Parent == "" {
+				d.addFamilyLocked(host)
+			}
+		}
+	}
+	var err error
+	if added > 0 {
+		err = d.saveSitesLocked()
+	}
+	d.mu.Unlock()
+	if err != nil {
+		return 0, err
+	}
+	if added > 0 {
+		d.log.Info("сайты загружены из файла", "added", added)
+		d.recheckSoon()
+	}
+	return added, nil
 }
 
 // relatedPattern — адреса в HTML страницы: по ним видно, откуда сайт грузит содержимое.
@@ -98,47 +193,51 @@ var relatedPattern = regexp.MustCompile(`(?i)https?://([a-z0-9][a-z0-9.\-]{1,80}
 // maxRelated — сколько доменов проверять: больше нет смысла, страницы тянут десятки мелочей.
 const maxRelated = 12
 
-// addRelated находит домены, с которых сайт грузит содержимое, проверяет их и добавляет в список
-// те, которым мешает провайдер. Так не приходится искать вручную, что ещё разблокировать.
+// addRelated находит домены, с которых сайт грузит содержимое, и добавляет в список те, что
+// принадлежат тому же сервису, и те, которым мешает провайдер. Так не приходится искать вручную,
+// что ещё разблокировать.
 func (d *Daemon) addRelated(ctx context.Context, host string) []string {
 	ctx, cancel := context.WithTimeout(ctx, 40*time.Second)
 	defer cancel()
 
-	candidates := relatedHosts(ctx, d.http, host)
-	if len(candidates) == 0 {
-		return nil
-	}
-	targets := make([]probe.Target, 0, len(candidates))
-	for _, c := range candidates {
-		targets = append(targets, probe.Target{Name: c, Group: userGroup, Kind: probe.KindTLS, Host: c, Weight: 1})
-	}
-	var blocked []string
-	for _, r := range d.prober.Run(ctx, targets) {
-		if r.Status != probe.OK && r.Status != probe.Slow {
-			blocked = append(blocked, r.Target.Host)
+	var own, targets []probe.Target
+	for _, c := range relatedHosts(ctx, d.http, host) {
+		t := probe.Target{Name: c, Group: userGroup, Kind: probe.KindTLS, Host: c, Weight: 1}
+		if sameBrand(host, c) {
+			own = append(own, t)
+		} else {
+			targets = append(targets, t)
 		}
 	}
-	if len(blocked) == 0 || ctx.Err() != nil {
+	add := make([]string, 0, len(own))
+	for _, t := range own {
+		add = append(add, t.Host)
+	}
+	for _, r := range d.prober.Run(ctx, targets) {
+		if r.Status != probe.OK && r.Status != probe.Slow {
+			add = append(add, r.Target.Host)
+		}
+	}
+	if len(add) == 0 || ctx.Err() != nil {
 		return nil
 	}
 
 	d.mu.Lock()
-	added := make([]string, 0, len(blocked))
-	for _, h := range blocked {
-		if d.cfg.AddSite(h, "нужен для "+host, time.Now()) {
+	added := make([]string, 0, len(add))
+	for _, h := range add {
+		if d.cfg.AddSite(config.Site{Host: h, Added: time.Now(), Parent: host}) {
 			added = append(added, h)
 		}
 	}
-	err := lists.WriteUserHosts(d.listsDir(), d.bypassHostsLocked())
-	if err == nil {
-		err = d.saveLocked()
-	}
+	err := d.saveSitesLocked()
 	d.mu.Unlock()
 	if err != nil {
 		d.log.Warn("связанные домены не сохранены", "err", err)
 		return nil
 	}
-	d.log.Info("добавлены связанные домены", "site", host, "hosts", strings.Join(added, ", "))
+	if len(added) > 0 {
+		d.log.Info("добавлены связанные домены", "site", host, "hosts", strings.Join(added, ", "))
+	}
 	return added
 }
 

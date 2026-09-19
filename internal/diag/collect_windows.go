@@ -293,3 +293,15 @@ func hiddenCommand(name string, args ...string) *exec.Cmd {
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: windows.CREATE_NO_WINDOW}
 	return cmd
 }
+
+// InternetVPN — VPN-адаптер, через который сейчас идёт интернет; пусто — напрямую или узнать не удалось.
+func InternetVPN() string {
+	list, index, err := adapters()
+	if err != nil {
+		return ""
+	}
+	if a := vpnAdapter(list, index); a != nil {
+		return a.Name
+	}
+	return ""
+}
