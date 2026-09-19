@@ -231,3 +231,16 @@ func describe(s probe.Status) string {
 	}
 	return string(s)
 }
+
+// offline — не открылся даже контрольный сайт: о сервисах судить нельзя.
+func offline(services []Service) bool {
+	return slices.ContainsFunc(services, func(s Service) bool { return s.State == StateUnknown })
+}
+
+// strategyLabel — «general (ALT5)» → «ALT5»: в наборе Flowseal все стратегии называются general (…).
+func strategyLabel(name string) string {
+	if inner, ok := strings.CutPrefix(name, "general ("); ok {
+		return strings.TrimSuffix(inner, ")")
+	}
+	return name
+}

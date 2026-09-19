@@ -309,6 +309,7 @@ main::-webkit-scrollbar-thumb { background: var(--line-strong); border-radius: 4
 .result-meta { font-size: 12px; color: var(--text-3); }
 .notice { display: flex; align-items: center; gap: 10px; padding: 16px; color: var(--text-2); }
 .notice > svg { flex: none; }
+.notice.warn { background: var(--amber-tint); color: var(--amber-text); }
 
 /* Панель с overflow: hidden во flex-колонке сжимается и обрезает содержимое — пусть лучше прокручивается окно. */
 main > .panel { flex: none; }

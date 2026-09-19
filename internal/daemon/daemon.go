@@ -30,6 +30,7 @@ import (
 
 var (
 	ErrBusy       = errors.New("уже идёт другая операция")
+	errVPN        = errors.New("Интернет идёт через VPN")
 	errNoStrategy = errors.New("стратегия ещё не подобрана")
 )
 
@@ -40,6 +41,7 @@ const (
 	autoSelectPause = time.Hour       // автоподбор не чаще: он на несколько минут прерывает интернет
 	retryDelay      = 5 * time.Second // пауза перед повторной проверкой упавших целей
 	confirmDelay    = time.Minute     // через сколько подтверждать поломку перед автоподбором
+	recheckOffline  = 2 * time.Minute // когда нет связи, следующая проверка скорее обычной
 )
 
 // Task — долгая операция, которую показывает окно.
@@ -64,8 +66,9 @@ type Status struct {
 	GameList     []strategy.Game `json:"game_profiles"`
 	AutoFix      bool            `json:"auto_fix"`
 	Error        string          `json:"error,omitempty"`
-	Conflict     []string        `json:"conflict,omitempty"` // другие обходы, из-за которых движок не запущен
-	VPN          string          `json:"vpn,omitempty"`      // интернет идёт через этот VPN: проверки видят его сеть
+	Conflict     []string        `json:"conflict,omitempty"`    // другие обходы, из-за которых движок не запущен
+	VPN          string          `json:"vpn,omitempty"`         // интернет идёт через этот VPN: проверки видят его сеть
+	SelectNote   string          `json:"select_note,omitempty"` // почему последний подбор прерван или что он исправил
 	Task         *Task           `json:"task,omitempty"`
 	Services     []Service       `json:"services"`
 	CheckedAt    time.Time       `json:"checked_at,omitzero"`
@@ -111,8 +114,9 @@ type Daemon struct {
 	latestChecked time.Time
 	updateErr     string
 
-	vpn     string // VPN-адаптер, через который шёл интернет при последней проверке
-	tgRoute string // каким путём прокси Telegram дошёл до Telegram при последней проверке
+	vpn        string // VPN-адаптер, через который шёл интернет при последней проверке
+	tgRoute    string // каким путём прокси Telegram дошёл до Telegram при последней проверке
+	selectNote string // для окна: почему подбор прерван или почему стратегия сменилась сама
 
 	ytNode   string    // видеосервер YouTube этой сети
 	ytNodeAt time.Time // когда его узнавали
@@ -186,13 +190,16 @@ func (d *Daemon) Run(ctx context.Context) error {
 			d.stopEngine()
 			return nil
 		case <-timer.C:
-			d.periodicCheck(ctx)
+			soon := d.periodicCheck(ctx)
 			d.maybeAutoUpdate(ctx)
 			d.maybeAppUpdate(ctx)
 			d.refreshCF(ctx, false)
 			d.mu.Lock()
 			every := max(time.Duration(d.cfg.CheckEvery), time.Minute)
 			d.mu.Unlock()
+			if soon {
+				every = min(every, recheckOffline)
+			}
 			timer.Reset(every)
 		}
 	}
@@ -200,6 +207,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 
 // Status возвращает снимок состояния.
 func (d *Daemon) Status() Status {
+	vpn := diag.InternetVPN() // сейчас, а не при прошлой проверке: окно предупреждает до подбора
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	st := Status{
@@ -214,7 +222,8 @@ func (d *Daemon) Status() Status {
 		AutoFix:      d.cfg.AutoFix,
 		Services:     slices.Clone(d.services),
 		Conflict:     slices.Clone(d.conflict),
-		VPN:          d.vpn,
+		VPN:          vpn,
+		SelectNote:   d.selectNote,
 		CheckedAt:    d.checkedAt,
 		Sites:        slices.Clone(d.cfg.Sites),
 	}
@@ -619,16 +628,19 @@ func (d *Daemon) recheckSoon() {
 	}()
 }
 
-func (d *Daemon) periodicCheck(ctx context.Context) {
+// periodicCheck проверяет сервисы и, если включена автопочинка, подбирает стратегию заново,
+// когда сервис сломался. true — связи нет, следующую проверку стоит сделать скорее.
+func (d *Daemon) periodicCheck(ctx context.Context) bool {
 	d.mu.Lock()
 	if d.cfg.Strategy == "" {
 		// Первый запуск: до подбора проверять нечего, а долгая проверка без обхода
 		// только держала бы занятой кнопку «Начать подбор».
 		d.mu.Unlock()
-		return
+		return false
 	}
 	prev := d.services
-	autoFix := d.cfg.AutoFix && d.proc != nil && time.Since(d.lastSelect) > autoSelectPause
+	autoFix := d.cfg.AutoFix && d.proc != nil
+	paused := time.Since(d.lastSelect) < autoSelectPause
 	d.mu.Unlock()
 
 	services, err := d.Check(ctx)
@@ -636,37 +648,99 @@ func (d *Daemon) periodicCheck(ctx context.Context) {
 		if !errors.Is(err, ErrBusy) && ctx.Err() == nil {
 			d.log.Warn("проверка не удалась", "err", err)
 		}
-		return
+		return false
 	}
-	if !autoFix || !regressed(prev, services) {
-		return
+	switch {
+	case offline(services):
+		// Не открывается даже контрольный сайт. Интернет мог пропасть, а могла сломать его
+		// сама стратегия — тогда ждать бесполезно, и часовая пауза автоподбора не действует.
+		if autoFix {
+			d.fixBrokenInternet(ctx)
+		}
+		return true
+	case !autoFix || paused || !regressed(prev, services):
+		return false
 	}
 	// Подбор на минуту прерывает интернет, поэтому сначала убеждаемся, что поломка не случайная.
 	d.log.Info("похоже, сервис перестал работать — перепроверю через минуту")
-	select {
-	case <-time.After(confirmDelay):
-	case <-ctx.Done():
-		return
+	if !d.sleep(ctx, confirmDelay) {
+		return false
 	}
 	services, err = d.Check(ctx)
 	switch {
 	case err != nil:
-		return
+		return false
 	case !regressed(prev, services):
 		d.log.Info("сбой был временным — подбор не нужен")
-		return
-	}
-	d.mu.Lock()
-	vpn := d.vpn
-	d.mu.Unlock()
-	if vpn != "" {
-		// Через VPN проверки видят не сеть провайдера: подбор по ним ничего не исправит.
-		d.log.Info("сервис не работает, но интернет идёт через VPN — подбор не запускаю", "adapter", vpn)
-		return
+		return false
 	}
 	d.log.Info("сервис перестал работать — подбираю стратегию заново")
 	if err := d.startSelect(true); err != nil {
 		d.log.Warn("подбор не запущен", "err", err)
+	}
+	return false
+}
+
+// fixBrokenInternet выясняет, не стратегия ли ломает интернет: выключает обход и проверяет
+// контрольный сайт. Открылся без обхода — стратегия негодная, и подбор начинается заново.
+func (d *Daemon) fixBrokenInternet(ctx context.Context) {
+	d.log.Info("нет связи даже с контрольным сайтом — перепроверю через минуту")
+	if !d.sleep(ctx, confirmDelay) {
+		return
+	}
+	services, err := d.Check(ctx)
+	if err != nil || !offline(services) {
+		return
+	}
+	d.mu.Lock()
+	vpn, strategy, running := d.vpn, d.cfg.Strategy, d.proc != nil
+	d.mu.Unlock()
+	if vpn != "" || !running {
+		return
+	}
+
+	d.stopEngine()
+	if !d.referenceOK(ctx) {
+		d.log.Info("связи нет и без обхода — дело не в стратегии, ждём интернет")
+		if err := d.startEngine(); err != nil {
+			d.log.Warn("обход не запущен", "err", err)
+		}
+		return
+	}
+	d.log.Warn("стратегия ломает интернет: без обхода сайты открываются — подбираю другую", "strategy", strategy)
+	d.mu.Lock()
+	d.cfg.Ranking = slices.DeleteFunc(d.cfg.Ranking, func(s string) bool { return s == strategy })
+	d.mu.Unlock()
+	if err := d.startSelect(false); err != nil {
+		d.log.Warn("подбор не запущен", "err", err)
+		d.startEngine()
+		return
+	}
+	d.mu.Lock()
+	d.selectNote = "Стратегия " + strategyLabel(strategy) + " ломала интернет у вашего провайдера — FI подбирает другую."
+	d.mu.Unlock()
+}
+
+// referenceOK — открывается ли контрольный сайт прямо сейчас.
+func (d *Daemon) referenceOK(ctx context.Context) bool {
+	for _, t := range probe.DefaultTargets() {
+		if t.Group != autoselect.ReferenceGroup {
+			continue
+		}
+		if r := d.prober.Check(ctx, t); r.Status != probe.OK && r.Status != probe.Slow {
+			return false
+		}
+	}
+	return true
+}
+
+// sleep ждёт d или отмены ctx; false — отменено.
+func (d *Daemon) sleep(ctx context.Context, wait time.Duration) bool {
+	select {
+	case <-time.After(wait):
+		return true
+	case <-ctx.Done():
+		return false
 	}
 }
 
@@ -677,6 +751,11 @@ func (d *Daemon) StartAutoSelect() error { return d.startSelect(false) }
 // прошлого полного подбора — интернет прерывается на минуту, а не на несколько. Если лидеров
 // не запомнено, подбор полный.
 func (d *Daemon) startSelect(quick bool) error {
+	// Через VPN все стратегии выглядят рабочими: подбор выбрал бы наугад и мог оставить такую,
+	// что без VPN ломает весь интернет.
+	if vpn := diag.InternetVPN(); vpn != "" {
+		return fmt.Errorf("%w (%s): через него все стратегии выглядят рабочими, и подбор выбрал бы наугад. Выключите VPN и запустите подбор снова", errVPN, vpn)
+	}
 	task := &Task{Kind: "select", Title: "Подбор стратегии"}
 	if !d.beginTask(task) && !(d.preemptCheck() && d.beginTask(task)) {
 		return ErrBusy
@@ -705,9 +784,19 @@ func (d *Daemon) startSelect(quick bool) error {
 		Ipset:    d.cfg.Ipset,
 		Targets:  selectTargets(d.cfg.MainSites()),
 		Prober:   d.prober,
-		OnStart:  func(i, total int, name string) { d.progress(i, total, name) },
+		OnStart: func(i, total int, name string) {
+			d.progress(i, total, name)
+			if vpn := diag.InternetVPN(); vpn != "" && ctx.Err() == nil {
+				d.log.Warn("во время подбора включился VPN — подбор прерван", "adapter", vpn)
+				d.mu.Lock()
+				d.selectNote = "Подбор прерван: включился VPN (" + vpn + "). Выключите его и запустите подбор снова."
+				d.mu.Unlock()
+				cancel()
+			}
+		},
 	}
 	d.task.Total = len(strategies) + 1
+	d.selectNote = ""
 	d.cancelTask = cancel
 	d.lastSelect = time.Now()
 	d.tasks.Add(1)
@@ -740,6 +829,9 @@ func (d *Daemon) finishAutoSelect(ctx context.Context, runs []selector.Run, err 
 		d.log.Info("подбор отменён")
 	default:
 		choice, ok := autoselect.Pick(runs)
+		if len(choice.Broken) > 0 {
+			d.log.Info("стратегии ломают интернет — не выбираются", "strategies", strings.Join(choice.Broken, ", "))
+		}
 		switch {
 		case !ok:
 			d.engineErr = "ни одна стратегия не запустилась"

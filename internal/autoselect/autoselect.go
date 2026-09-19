@@ -108,6 +108,7 @@ type Choice struct {
 	Needed  bool           // обход даёт больше, чем сеть без него
 	Dropped []probe.Target // цели, не открывшиеся ни в одном прогоне
 	Ranking []string       // лучшие стратегии, лучшая первая
+	Broken  []string       // стратегии, при которых перестаёт открываться то, что работало без обхода
 }
 
 // Pick выбирает стратегию для постоянной работы — лучшую по сумме оценок.
@@ -115,16 +116,37 @@ type Choice struct {
 func Pick(runs []selector.Run) (Choice, bool) {
 	scored, dropped := selector.DropUnreachable(runs)
 	var candidates []selector.Run
+	var broken []string
+	// Контрольный сайт, который открывался без обхода, при стратегии открываться обязан: иначе
+	// она ломает весь интернет (так бывает с syndata на всех соединениях), сколько бы очков ни набрала.
+	baseRef := len(scored) > 0 && referenceOK(scored[0])
 	for _, r := range scored[min(1, len(scored)):] {
-		if r.Error == "" {
+		switch {
+		case r.Error != "":
+		case baseRef && !referenceOK(r):
+			broken = append(broken, r.Strategy)
+		default:
 			candidates = append(candidates, r)
 		}
 	}
 	best, ok := selector.BestOverall(candidates)
 	if !ok {
-		return Choice{Dropped: dropped}, false
+		return Choice{Dropped: dropped, Broken: broken}, false
 	}
 	bestScore, _, _ := best.Total()
 	baseScore, _, _ := scored[0].Total()
-	return Choice{Best: best, Needed: bestScore > baseScore, Dropped: dropped, Ranking: selector.Rank(candidates, RankingSize)}, true
+	return Choice{Best: best, Needed: bestScore > baseScore, Dropped: dropped, Ranking: selector.Rank(candidates, RankingSize), Broken: broken}, true
+}
+
+// ReferenceGroup — группа контрольных целей: они открываются почти в любой сети.
+const ReferenceGroup = "reference"
+
+// referenceOK — в прогоне открылись все контрольные цели (или их не было).
+func referenceOK(r selector.Run) bool {
+	for _, res := range r.Results {
+		if res.Target.Group == ReferenceGroup && res.Status != probe.OK && res.Status != probe.Slow {
+			return false
+		}
+	}
+	return true
 }

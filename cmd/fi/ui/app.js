@@ -236,6 +236,16 @@ function heroView(st) {
   </section>`;
 }
 
+// vpnSelectNotice — предупреждение на экране подбора: через VPN все стратегии выглядят рабочими.
+const vpnSelectNotice = (st) =>
+  st.vpn
+    ? `<section class="panel notice warn">${icon('globe', 16)}<span>Выключите VPN (${esc(st.vpn)}), чтобы подобрать стратегию. Через него все стратегии выглядят рабочими, и подбор выбрал бы наугад — а без VPN такая стратегия может сломать интернет.</span></section>`
+    : '';
+
+// selectNote — почему подбор прерван или почему стратегия сменилась сама.
+const selectNote = (st) =>
+  st.select_note ? `<section class="panel notice">${icon('pulse', 16)}<span>${esc(st.select_note)}</span></section>` : '';
+
 // routeText — каким путём прокси ходит в Telegram: «через Cloudflare», «напрямую».
 const routeText = (route) => (route === 'напрямую' ? route : `через ${route}`);
 
@@ -287,6 +297,7 @@ function mainView(st) {
   return `${heroView(st)}
     ${errorLine()}
     ${vpn}
+    ${selectNote(st)}
     <section class="stack">
       <div class="section-label"><span>Сервисы</span></div>
       <div class="panel">${services.map((s) => serviceRow(s, st)).join('')}</div>
@@ -331,8 +342,9 @@ function setupView(st) {
   const task = st.task?.kind === 'select' ? st.task : null;
   if (!task) {
     // Фоновая проверка сервисов не мешает: служба прервёт её ради подбора.
-    const busy = st.task && st.task.kind !== 'check';
+    const busy = (st.task && st.task.kind !== 'check') || st.vpn;
     return `${intro('Подберём')}
+      ${vpnSelectNotice(st)}${selectNote(st)}
       ${errorLine()}
       <div class="setup-actions"><button class="btn primary full" data-action="select" ${busy ? 'disabled' : ''}>Начать подбор</button></div>`;
   }
@@ -511,7 +523,7 @@ function diagnoseView(st) {
   const primary =
     service.state === 'ok' || service.state === 'unknown'
       ? ''
-      : `<button class="btn primary full" data-action="select" ${st.task ? 'disabled' : ''}>Подобрать стратегию заново</button>`;
+      : `<button class="btn primary full" data-action="select" ${st.task || st.vpn ? 'disabled' : ''}>Подобрать стратегию заново</button>`;
   const hindrances = problemsOf(d.report).filter((f) => f.level !== 'info');
 
   return `${subHeader(`${title} · результат`)}
@@ -629,7 +641,7 @@ function settingsView(st) {
                 .map((name) => `<option value="${esc(name)}" ${name === st.strategy ? 'selected' : ''}>${esc(strategyLabel(name))}</option>`)
                 .join('')}
             </select>
-            <button class="btn sm" data-action="select" ${st.task ? 'disabled' : ''}>Подобрать</button>
+            <button class="btn sm" data-action="select" ${st.task || st.vpn ? 'disabled' : ''} title="${st.vpn ? 'Выключите VPN: через него подбор выбрал бы наугад' : ''}">Подобрать</button>
           </div>
         </div>
         <div class="settings-row">

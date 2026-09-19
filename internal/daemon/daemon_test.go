@@ -223,3 +223,15 @@ func TestEnsureFamiliesMigrates(t *testing.T) {
 		t.Fatalf("семейство не добавлено к уже сохранённому сайту: %v", hosts)
 	}
 }
+
+func TestOfflineAndStrategyLabel(t *testing.T) {
+	if !offline([]Service{{ID: "youtube", State: StateOK}, {ID: "discord", State: StateUnknown}}) {
+		t.Error("контрольный сайт не открылся — это «нет связи»")
+	}
+	if offline([]Service{{ID: "youtube", State: StateFail}}) {
+		t.Error("сломанный сервис — ещё не «нет связи»")
+	}
+	if got := strategyLabel("general (ALT5)"); got != "ALT5" {
+		t.Errorf("strategyLabel = %q", got)
+	}
+}

@@ -34,3 +34,19 @@ func TestPick(t *testing.T) {
 		t.Error("ни одна стратегия не запустилась, но Pick вернул выбор")
 	}
 }
+
+// TestPickSkipsInternetKillers: стратегия, при которой не открывается контрольный сайт,
+// не выбирается, даже если остальное у неё открылось лучше.
+func TestPickSkipsInternetKillers(t *testing.T) {
+	res := func(host, group string, st probe.Status) probe.Result {
+		return probe.Result{Target: probe.Target{Name: host, Group: group, Host: host, Weight: 1}, Status: st}
+	}
+	baseline := selector.NewRun(selector.Baseline, []probe.Result{res("a", "g", probe.OK), res("b", "g", probe.TLSReset), res("google", ReferenceGroup, probe.OK)})
+	killer := selector.NewRun("ALT5", []probe.Result{res("a", "g", probe.OK), res("b", "g", probe.OK), res("google", ReferenceGroup, probe.TCPFail)})
+	safe := selector.NewRun("EXP", []probe.Result{res("a", "g", probe.OK), res("b", "g", probe.TLSReset), res("google", ReferenceGroup, probe.OK)})
+
+	c, ok := Pick([]selector.Run{baseline, killer, safe})
+	if !ok || c.Best.Strategy != "EXP" || len(c.Broken) != 1 || c.Broken[0] != "ALT5" {
+		t.Fatalf("Pick = %s, broken %v, %v", c.Best.Strategy, c.Broken, ok)
+	}
+}
