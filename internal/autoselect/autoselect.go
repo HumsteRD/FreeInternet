@@ -3,6 +3,7 @@ package autoselect
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 
@@ -27,6 +28,8 @@ type Options struct {
 	OnStart func(i, total int, name string)
 	// OnRun вызывается после прогона.
 	OnRun func(i, total int, run selector.Run)
+	// Heal выгружает зависший драйвер WinDivert, чтобы winws можно было запустить снова.
+	Heal func() error
 }
 
 // Run делает прогон без обхода и прогоны стратегий; при отмене ctx возвращает то, что успел.
@@ -71,20 +74,24 @@ func Run(ctx context.Context, o Options, strategies []strategy.Strategy) ([]sele
 			break
 		}
 		o.start(i+1, total, s.Name)
-		run := measure(ctx, o.Prober, exe, s.Name, s.Expand(vars), o.Targets)
+		run := measure(ctx, o, exe, s.Name, s.Expand(vars))
 		runs = append(runs, run)
 		o.done(i+1, total, run)
 	}
 	return runs, nil
 }
 
-func measure(ctx context.Context, prober *probe.Prober, exe, name string, args []string, targets []probe.Target) selector.Run {
+func measure(ctx context.Context, o Options, exe, name string, args []string) selector.Run {
 	proc, err := engine.Start(ctx, exe, args)
+	var re *engine.RunError
+	if err != nil && o.Heal != nil && errors.As(err, &re) && re.WinDivert() && o.Heal() == nil {
+		proc, err = engine.Start(ctx, exe, args)
+	}
 	if err != nil {
 		return selector.Run{Strategy: name, Error: err.Error()}
 	}
 	defer proc.Stop()
-	return selector.NewRun(name, prober.Run(ctx, targets))
+	return selector.NewRun(name, o.Prober.Run(ctx, o.Targets))
 }
 
 func (o Options) start(i, total int, name string) {

@@ -50,14 +50,14 @@ func Start(ctx context.Context, exe string, args []string) (*Process, error) {
 	case <-out.ready:
 		return p, nil
 	case <-p.done:
-		return nil, fmt.Errorf("winws завершился при старте (%v): %s", p.waitErr, out.tail())
+		return nil, &RunError{AtStart: true, Exit: p.waitErr, Output: out.tail()}
 	case <-ctx.Done():
 		p.Stop()
 		return nil, ctx.Err()
 	case <-timer.C:
 		select {
 		case <-p.done:
-			return nil, fmt.Errorf("winws завершился при старте (%v): %s", p.waitErr, out.tail())
+			return nil, &RunError{AtStart: true, Exit: p.waitErr, Output: out.tail()}
 		default:
 			return p, nil
 		}
@@ -90,7 +90,7 @@ func (p *Process) Done() <-chan struct{} {
 func (p *Process) Err() error {
 	select {
 	case <-p.done:
-		return fmt.Errorf("%v: %s", p.waitErr, p.out.tail())
+		return &RunError{Exit: p.waitErr, Output: p.out.tail()}
 	default:
 		return nil
 	}

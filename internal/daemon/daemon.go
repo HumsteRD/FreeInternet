@@ -35,13 +35,14 @@ var (
 )
 
 const (
-	maxRestarts     = 3
-	restartWindow   = 10 * time.Minute
-	restartDelay    = 5 * time.Second
-	autoSelectPause = time.Hour       // автоподбор не чаще: он на несколько минут прерывает интернет
-	retryDelay      = 5 * time.Second // пауза перед повторной проверкой упавших целей
-	confirmDelay    = time.Minute     // через сколько подтверждать поломку перед автоподбором
-	recheckOffline  = 2 * time.Minute // когда нет связи, следующая проверка скорее обычной
+	maxRestarts       = 3
+	restartWindow     = 10 * time.Minute
+	restartDelay      = 5 * time.Second
+	autoSelectPause   = time.Hour       // автоподбор не чаще: он на несколько минут прерывает интернет
+	retryDelay        = 5 * time.Second // пауза перед повторной проверкой упавших целей
+	confirmDelay      = time.Minute     // через сколько подтверждать поломку перед автоподбором
+	recheckOffline    = 2 * time.Minute // когда нет связи, следующая проверка скорее обычной
+	quietAfterUseless = 6 * time.Hour   // пауза автоподбора, если быстрый подбор не нашёл ничего лучше
 )
 
 // Task — долгая операция, которую показывает окно.
@@ -114,9 +115,10 @@ type Daemon struct {
 	latestChecked time.Time
 	updateErr     string
 
-	vpn        string // VPN-адаптер, через который шёл интернет при последней проверке
-	tgRoute    string // каким путём прокси Telegram дошёл до Telegram при последней проверке
-	selectNote string // для окна: почему подбор прерван или почему стратегия сменилась сама
+	vpn        string    // VPN-адаптер, через который шёл интернет при последней проверке
+	tgRoute    string    // каким путём прокси Telegram дошёл до Telegram при последней проверке
+	selectNote string    // для окна: почему подбор прерван или почему стратегия сменилась сама
+	quietUntil time.Time // до этого времени автоподбор не запускается: прошлый ничего не нашёл
 
 	ytNode   string    // видеосервер YouTube этой сети
 	ytNodeAt time.Time // когда его узнавали
@@ -361,20 +363,57 @@ func (d *Daemon) startEngine() error {
 	}
 	var proc *engine.Process
 	if err == nil {
-		proc, err = engine.Start(context.Background(), exe, args)
+		proc, err = d.startWinws(exe, args)
 	}
 
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.conflict = others
 	if err != nil {
-		d.engineErr = err.Error()
+		var re *engine.RunError
+		if errors.As(err, &re) {
+			d.log.Warn("winws не запустился", "reason", re.Reason(), "output", re.Output)
+		}
+		d.engineErr = engineErrorText(err)
 		return err
 	}
 	d.proc, d.engineErr = proc, ""
 	d.log.Info("обход запущен", "strategy", d.cfg.Strategy)
 	go d.watch(proc)
 	return nil
+}
+
+// startWinws запускает winws. Если не открылся драйвер WinDivert — обычно он завис после
+// прошлого запуска, — драйвер выгружается и winws запускается ещё раз: без этого обход
+// не заработал бы до перезагрузки.
+func (d *Daemon) startWinws(exe string, args []string) (*engine.Process, error) {
+	proc, err := engine.Start(context.Background(), exe, args)
+	var re *engine.RunError
+	if err == nil || !errors.As(err, &re) || !re.WinDivert() {
+		return proc, err
+	}
+	d.log.Warn("драйвер WinDivert не открылся — выгружаю его и запускаю снова", "reason", re.Reason(), "output", re.Output)
+	if uerr := healWinDivert(); uerr != nil {
+		d.log.Warn("драйвер WinDivert не выгружен", "err", uerr)
+		return nil, err
+	}
+	proc, err = engine.Start(context.Background(), exe, args)
+	if err == nil {
+		d.log.Info("драйвер WinDivert перезапущен, обход работает")
+	}
+	return proc, err
+}
+
+// healWinDivert выгружает драйвер WinDivert, если его не держит другой обход.
+var healWinDivert = diag.UnloadWinDivert
+
+// engineErrorText — ошибка движка для окна: коротко и с тем, что делать.
+func engineErrorText(err error) string {
+	var re *engine.RunError
+	if errors.As(err, &re) && re.WinDivert() {
+		return "Драйвер WinDivert не запускается, и перезапустить его не удалось — перезагрузите компьютер. Причина: " + re.Reason()
+	}
+	return err.Error()
 }
 
 func (d *Daemon) engineArgsLocked() (string, []string, error) {
@@ -421,13 +460,17 @@ func (d *Daemon) watch(proc *engine.Process) {
 		return
 	}
 	d.proc = nil
-	d.engineErr = fmt.Sprintf("движок завершился: %v", proc.Err())
+	d.engineErr = engineErrorText(proc.Err())
 	now := time.Now()
 	d.restarts = append(slices.DeleteFunc(d.restarts, func(t time.Time) bool { return now.Sub(t) > restartWindow }), now)
 	retry := len(d.restarts) <= maxRestarts && d.cfg.Enabled
 	d.mu.Unlock()
 
-	d.log.Warn("движок завершился", "err", proc.Err(), "retry", retry)
+	var output string
+	if re, ok := proc.Err().(*engine.RunError); ok {
+		output = re.Output
+	}
+	d.log.Warn("движок завершился", "err", proc.Err(), "retry", retry, "output", output)
 	if !retry {
 		return
 	}
@@ -630,7 +673,7 @@ func (d *Daemon) recheckSoon() {
 
 // periodicCheck проверяет сервисы и, если включена автопочинка, подбирает стратегию заново,
 // когда сервис сломался. true — связи нет, следующую проверку стоит сделать скорее.
-func (d *Daemon) periodicCheck(ctx context.Context) bool {
+func (d *Daemon) periodicCheck(ctx context.Context) (soon bool) {
 	d.mu.Lock()
 	if d.cfg.Strategy == "" {
 		// Первый запуск: до подбора проверять нечего, а долгая проверка без обхода
@@ -638,9 +681,25 @@ func (d *Daemon) periodicCheck(ctx context.Context) bool {
 		d.mu.Unlock()
 		return false
 	}
+	down := d.cfg.Enabled && d.proc == nil && d.task == nil && d.baseErr == nil
+	d.mu.Unlock()
+	if down {
+		// Обход должен работать, но не запущен: прошлый запуск не удался. Без повтора служба
+		// так и осталась бы без обхода.
+		d.log.Info("обход включён, но не работает — запускаю снова")
+		if err := d.startEngine(); err != nil {
+			d.log.Warn("обход не запущен", "err", err)
+			var re *engine.RunError
+			if errors.As(err, &re) {
+				defer func() { soon = true }() // сбой winws: пробуем снова через пару минут, а не через 15
+			}
+		}
+	}
+
+	d.mu.Lock()
 	prev := d.services
 	autoFix := d.cfg.AutoFix && d.proc != nil
-	paused := time.Since(d.lastSelect) < autoSelectPause
+	paused := time.Since(d.lastSelect) < autoSelectPause || time.Now().Before(d.quietUntil)
 	d.mu.Unlock()
 
 	services, err := d.Check(ctx)
@@ -784,6 +843,7 @@ func (d *Daemon) startSelect(quick bool) error {
 		Ipset:    d.cfg.Ipset,
 		Targets:  selectTargets(d.cfg.MainSites()),
 		Prober:   d.prober,
+		Heal:     healWinDivert,
 		OnStart: func(i, total int, name string) {
 			d.progress(i, total, name)
 			if vpn := diag.InternetVPN(); vpn != "" && ctx.Err() == nil {
@@ -831,12 +891,18 @@ func (d *Daemon) finishAutoSelect(ctx context.Context, runs []selector.Run, err 
 		choice, ok := autoselect.Pick(runs)
 		if len(choice.Broken) > 0 {
 			d.log.Info("стратегии ломают интернет — не выбираются", "strategies", strings.Join(choice.Broken, ", "))
+			d.cfg.Ranking = slices.DeleteFunc(d.cfg.Ranking, func(s string) bool { return slices.Contains(choice.Broken, s) })
 		}
 		switch {
 		case !ok:
 			d.engineErr = "ни одна стратегия не запустилась"
 		case quick && choice.Best.Strategy == current:
 			d.log.Info("быстрый подбор: лучше текущей стратегии не нашлось", "strategy", current)
+			// Раз стратегии не помогают, сбой не в DPI: следующий автоподбор снова ничего бы не дал.
+			d.quietUntil = time.Now().Add(quietAfterUseless)
+			if err := d.saveLocked(); err != nil {
+				d.log.Error("настройки не сохранены", "err", err)
+			}
 		default:
 			d.cfg.Strategy = choice.Best.Strategy
 			if !quick { // лидеров запоминает только полный подбор: быстрый видел не все стратегии

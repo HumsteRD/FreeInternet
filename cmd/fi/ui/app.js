@@ -141,7 +141,7 @@ function progress(done, total) {
 const subHeader = (title) =>
   `<div class="subheader"><button class="icon-btn" data-action="back" aria-label="Назад">${icon('chevronLeft', 18)}</button><h1>${esc(title)}</h1></div>`;
 
-const errorLine = () => (state.message ? `<p class="field-error">${esc(state.message)}</p>` : '');
+const errorLine = () => (state.message ? `<p class="field-error" title="${esc(state.message)}">${esc(state.message)}</p>` : '');
 const noticeLine = () => (state.notice ? `<p class="notice-line">${icon('check', 14, 2)}<span>${esc(state.notice)}</span></p>` : '');
 
 function baseLine(base = {}) {
@@ -229,7 +229,7 @@ function heroView(st) {
   return `<section class="panel hero-panel">
     <div class="hero">
       ${mark(44)}
-      <div class="hero-text"><span class="hero-title">${title}</span><span class="hero-sub">${sub}</span></div>
+      <div class="hero-text"><span class="hero-title">${title}</span><span class="hero-sub" title="${st.error ? esc(st.error) : ''}">${sub}</span></div>
       <button class="toggle ${st.enabled ? 'on' : ''}" role="switch" aria-checked="${st.enabled}" aria-label="Обход" data-action="toggle" ${task?.kind === 'select' ? 'disabled' : ''}></button>
     </div>
     ${taskRow}

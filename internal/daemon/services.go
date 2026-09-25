@@ -18,6 +18,8 @@ type Service struct {
 	Slow   int    `json:"slow"`
 	Total  int    `json:"total"`
 	Detail string `json:"detail,omitempty"`
+	// fixable — среди сбоев есть такой, что лечит стратегия (помехи DPI), а не блок по адресу или DNS.
+	fixable bool
 }
 
 const (
@@ -93,6 +95,7 @@ func summarize(results []probe.Result) []Service {
 			case probe.Slow:
 				s.Slow++
 			default:
+				s.fixable = s.fixable || strategyFixes(r.Status)
 				if s.Detail == "" {
 					// «Discord: gateway» под строкой Discord читается как «Gateway».
 					// Адреса своих сайтов оставляем как есть.
@@ -185,14 +188,16 @@ var stateText = map[string]string{
 	StateEmpty:   "проверять нечего",
 }
 
-// regressed — какой-то сервис работал при прошлой проверке и сломался сейчас.
+// regressed — какой-то сервис работал при прошлой проверке и сломался сейчас так, что может
+// помочь другая стратегия. Недоступный по адресу сервер или подмена DNS подбором не лечатся:
+// переподбор тогда только зря прервал бы интернет.
 func regressed(prev, cur []Service) bool {
 	was := make(map[string]string, len(prev))
 	for _, s := range prev {
 		was[s.ID] = s.State
 	}
 	for _, s := range cur {
-		if was[s.ID] == StateOK && (s.State == StateFail || s.State == StatePartial) {
+		if was[s.ID] == StateOK && (s.State == StateFail || s.State == StatePartial) && s.fixable {
 			return true
 		}
 	}
@@ -243,4 +248,13 @@ func strategyLabel(name string) string {
 		return strings.TrimSuffix(inner, ")")
 	}
 	return name
+}
+
+// strategyFixes — такой сбой бывает от помех DPI, и другая стратегия может его исправить.
+func strategyFixes(s probe.Status) bool {
+	switch s {
+	case probe.TLSReset, probe.TLSTimeout, probe.Freeze16K, probe.ConnReset, probe.QUICFail, probe.UDPFail, probe.Failed:
+		return true
+	}
+	return false
 }

@@ -6,10 +6,12 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
 	"fi/internal/config"
+	"fi/internal/engine"
 	"fi/internal/probe"
 )
 
@@ -233,5 +235,34 @@ func TestOfflineAndStrategyLabel(t *testing.T) {
 	}
 	if got := strategyLabel("general (ALT5)"); got != "ALT5" {
 		t.Errorf("strategyLabel = %q", got)
+	}
+}
+
+func TestRegressedOnlyWhenStrategyCanHelp(t *testing.T) {
+	prev := []Service{{ID: "discord", State: StateOK}}
+	ipBlock := summarize([]probe.Result{
+		{Target: probe.Target{Name: "Discord: сайт", Group: "discord"}, Status: probe.TCPFail},
+		{Target: probe.Target{Name: "Discord: CDN", Group: "discord"}, Status: probe.OK},
+	})
+	if regressed(prev, ipBlock) {
+		t.Error("сервер недоступен по адресу — подбор тут не поможет, а интернет прервёт")
+	}
+	dpi := summarize([]probe.Result{
+		{Target: probe.Target{Name: "Discord: сайт", Group: "discord"}, Status: probe.TLSReset},
+		{Target: probe.Target{Name: "Discord: CDN", Group: "discord"}, Status: probe.OK},
+	})
+	if !regressed(prev, dpi) {
+		t.Error("сброс соединения — помеха DPI, другая стратегия может помочь")
+	}
+}
+
+func TestEngineErrorText(t *testing.T) {
+	stuck := &engine.RunError{AtStart: true, Output: "Loading...\nwindivert: error opening filter: The object is referenced by other objects so cannot be deleted."}
+	if got := engineErrorText(stuck); !strings.HasPrefix(got, "Драйвер WinDivert не запускается") || strings.Contains(got, "Loading") {
+		t.Errorf("engineErrorText = %q", got)
+	}
+	plain := &engine.RunError{AtStart: true, Output: "bad option --foo"}
+	if got := engineErrorText(plain); got != "winws не запустился: bad option --foo" {
+		t.Errorf("engineErrorText = %q", got)
 	}
 }
