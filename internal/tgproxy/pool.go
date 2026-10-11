@@ -224,6 +224,26 @@ func (p *pool) sweep() {
 	}
 }
 
+// flush закрывает все готовые соединения и сразу открывает новые: после смены сети
+// (включили или выключили VPN) старые молча не работают, а проверка alive этого не видит.
+func (p *pool) flush() {
+	p.mu.Lock()
+	var idle []upstream
+	for k, e := range p.entries {
+		for _, c := range e.idle {
+			idle = append(idle, c.up)
+		}
+		e.idle = nil
+		if !p.closed {
+			p.fillLocked(k, e)
+		}
+	}
+	p.mu.Unlock()
+	for _, up := range idle {
+		up.close()
+	}
+}
+
 // ready — сколько готовых соединений сейчас в пуле.
 func (p *pool) ready() int {
 	p.mu.Lock()

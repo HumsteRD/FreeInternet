@@ -34,6 +34,8 @@ type TelegramStatus struct {
 	// MiniApps — сайты Telegram для мини-приложений идут через FI; MiniAppsError — почему не вышло.
 	MiniApps      bool   `json:"mini_apps"`
 	MiniAppsError string `json:"mini_apps_error,omitempty"`
+	// WorkerOutdated — код воркера старый: сайты Telegram для мини-приложений он не откроет.
+	WorkerOutdated bool `json:"worker_outdated,omitempty"`
 	tgproxy.Stats
 }
 
@@ -79,6 +81,7 @@ func (d *Daemon) telegramStatusLocked() TelegramStatus {
 	}
 	if st.Enabled && st.MiniApps {
 		st.MiniAppsError = d.webErr
+		st.WorkerOutdated = st.Worker != "" && d.workerVer > 0 && d.workerVer < tgproxy.WorkerVersionWeb
 	}
 	if secret, err := hex.DecodeString(d.cfg.Telegram.Secret); err == nil && len(secret) == 16 {
 		st.Link = tgproxy.Link(st.Address, secret)

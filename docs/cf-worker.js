@@ -9,10 +9,12 @@
 //   3. Адрес воркера (fi-tg.имя.workers.dev) вписать в FI без https://:
 //      Настройки → Telegram → «Свой Cloudflare Worker» → Сохранить.
 //
-// Воркер ничего не расшифровывает: внутри соединения идёт MTProto, ключ знают только
-// Telegram и ваш клиент.
+// Воркер ничего не расшифровывает: внутри соединения идёт MTProto или TLS, ключи знают только
+// Telegram и ваш клиент. Проверка: https://<адрес воркера>/?check=telegram.org
 
 import { connect } from "cloudflare:sockets";
+
+const VERSION = 2;
 
 // Адреса дата-центров Telegram.
 const DC = {
@@ -40,33 +42,83 @@ function isTelegramWeb(host) {
   return WEB.some((d) => host === d || host.endsWith("." + d));
 }
 
+// IPv4-адреса сайта через DNS Cloudflare: подключение по имени из воркера к сайтам Telegram
+// не проходит, по адресу — проходит.
+async function resolveA(host) {
+  const r = await fetch(`https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(host)}&type=A`, {
+    headers: { accept: "application/dns-json" },
+  });
+  const j = await r.json();
+  return (j.Answer || []).filter((a) => a.type === 1).map((a) => a.data);
+}
+
+// Куда подключаться: адреса дата-центра или сайта Telegram, по порядку.
+async function targets(url) {
+  const host = url.searchParams.get("host") || url.searchParams.get("check");
+  if (host) {
+    if (!isTelegramWeb(host) || (url.searchParams.get("port") || "443") !== "443") {
+      return { error: "можно только сайты Telegram на порту 443", status: 403 };
+    }
+    let ips = [];
+    try {
+      ips = await resolveA(host);
+    } catch {}
+    return { list: [...ips, host] };
+  }
+  const table = url.searchParams.get("test") === "1" ? DC_TEST : DC;
+  const address = table[Number(url.searchParams.get("dc"))];
+  if (!address) {
+    return { error: "неизвестный дата-центр", status: 400 };
+  }
+  return { list: [address] };
+}
+
+// Открывает TCP к первому адресу, который ответил.
+async function open(list, log) {
+  let last = new Error("нет адресов");
+  for (const hostname of list) {
+    try {
+      const socket = connect({ hostname, port: 443 });
+      await socket.opened;
+      log?.push(`${hostname}: подключено`);
+      return socket;
+    } catch (e) {
+      last = e;
+      log?.push(`${hostname}: ${e?.message || e}`);
+    }
+  }
+  throw last;
+}
+
 export default {
   async fetch(request) {
     const url = new URL(request.url);
-    if (request.headers.get("Upgrade") !== "websocket") {
-      return new Response("FI worker: работает", { status: 200 });
+    const t = await targets(url);
+    if (t.error) {
+      return new Response(t.error, { status: t.status });
     }
 
-    let target;
-    const host = url.searchParams.get("host");
-    if (host) {
-      if (!isTelegramWeb(host) || url.searchParams.get("port") !== "443") {
-        return new Response("можно только сайты Telegram на порту 443", { status: 403 });
+    if (request.headers.get("Upgrade") !== "websocket") {
+      if (!url.searchParams.get("check")) {
+        return new Response(`FI worker: работает (версия ${VERSION})`, { status: 200 });
       }
-      target = { hostname: host, port: 443 };
-    } else {
-      const table = url.searchParams.get("test") === "1" ? DC_TEST : DC;
-      const address = table[Number(url.searchParams.get("dc"))];
-      if (!address) {
-        return new Response("неизвестный дата-центр", { status: 400 });
-      }
-      target = { hostname: address, port: 443 };
+      const log = [];
+      try {
+        const socket = await open(t.list, log);
+        socket.close().catch(() => {});
+      } catch {}
+      return new Response(log.join("\n") + "\n", { status: 200, headers: { "content-type": "text/plain; charset=utf-8" } });
+    }
+
+    let socket;
+    try {
+      socket = await open(t.list);
+    } catch (e) {
+      return new Response("не удалось подключиться: " + (e?.message || e), { status: 502 });
     }
 
     const [client, server] = Object.values(new WebSocketPair());
     server.accept();
-
-    const socket = connect(target);
     const writer = socket.writable.getWriter();
 
     server.addEventListener("message", (event) => {

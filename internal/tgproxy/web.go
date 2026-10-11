@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -187,6 +188,13 @@ func (p *WebProxy) worker(ctx context.Context, host string, port int) (net.Conn,
 	return p.Server.dialWorkerTCP(ctx, host, port)
 }
 
+// NetworkChanged забывает, какие сайты не открывались напрямую: в новой сети это могло измениться.
+func (p *WebProxy) NetworkChanged() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.blocked = nil
+}
+
 func (p *WebProxy) directBlocked(host string) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -238,8 +246,11 @@ func (s *Server) dialWorkerTCP(ctx context.Context, host string, port int) (net.
 			return &wsStream{ws: ws}, nil
 		}
 		var se *statusError
-		if errors.As(err, &se) && se.code == http.StatusBadRequest {
+		switch {
+		case errors.As(err, &se) && se.code == http.StatusBadRequest:
 			return nil, fmt.Errorf("воркер %s не умеет открывать сайты Telegram — обновите его код из FI", s.Worker)
+		case errors.As(err, &se) && se.code == http.StatusBadGateway:
+			return nil, fmt.Errorf("воркер %s не смог подключиться к %s", s.Worker, host)
 		}
 		errs = append(errs, fmt.Errorf("воркер %s через %s: %w", s.Worker, ip, err))
 	}
@@ -247,6 +258,36 @@ func (s *Server) dialWorkerTCP(ctx context.Context, host string, port int) (net.
 		return nil, fmt.Errorf("воркер %s: адрес не найден", s.Worker)
 	}
 	return nil, errors.Join(errs...)
+}
+
+// WorkerVersionWeb — версия кода воркера, с которой работают мини-приложения: прежний код
+// открывал сайты Telegram по имени, а так из воркера они не открываются.
+const WorkerVersionWeb = 2
+
+var workerVersionRe = regexp.MustCompile(`версия (\d+)`)
+
+// WorkerVersion узнаёт версию кода воркера по его ответу на обычный запрос:
+// «FI worker: работает (версия 2)»; без номера — первая версия.
+func WorkerVersion(ctx context.Context, client *http.Client, worker string) (int, error) {
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://"+worker+"/", nil)
+	if err != nil {
+		return 0, err
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), "FI worker") {
+		return 0, fmt.Errorf("по адресу %s не воркер FI (HTTP %d)", worker, resp.StatusCode)
+	}
+	if m := workerVersionRe.FindStringSubmatch(string(body)); m != nil {
+		return strconv.Atoi(m[1])
+	}
+	return 1, nil
 }
 
 // wsStream — соединение WebSocket с воркером как обычный поток байтов.

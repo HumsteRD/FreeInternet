@@ -43,10 +43,11 @@ const (
 	confirmDelay      = time.Minute     // через сколько подтверждать поломку перед автоподбором
 	recheckOffline    = 2 * time.Minute // когда нет связи, следующая проверка скорее обычной
 	quietAfterUseless = 6 * time.Hour   // пауза автоподбора, если быстрый подбор не нашёл ничего лучше
-	// vpnPoll — как часто смотреть, не включился ли VPN: движок надо сразу убрать с адаптера VPN,
-	// иначе поддельные пакеты стратегии попадают в туннель и ломают соединения внутри него.
-	vpnPoll = 3 * time.Second
 )
+
+// vpnPoll — как часто смотреть, не включился ли VPN: движок надо сразу убрать с адаптера VPN,
+// иначе поддельные пакеты стратегии попадают в туннель и ломают соединения внутри него.
+var vpnPoll = 3 * time.Second
 
 // Task — долгая операция, которую показывает окно.
 type Task struct {
@@ -110,15 +111,16 @@ type Daemon struct {
 	checkedAt      time.Time
 	lastSelect     time.Time
 
-	tg      *tgproxy.Server
-	tgStop  context.CancelFunc
-	tgDone  chan struct{}
-	tgErr   string
-	tgCF    []string  // общие домены Cloudflare (tg-ws-proxy)
-	tgCFAt  time.Time // когда их обновляли
-	web     *tgproxy.WebProxy
-	webDone chan struct{}
-	webErr  string
+	tg        *tgproxy.Server
+	tgStop    context.CancelFunc
+	tgDone    chan struct{}
+	tgErr     string
+	tgCF      []string  // общие домены Cloudflare (tg-ws-proxy)
+	tgCFAt    time.Time // когда их обновляли
+	web       *tgproxy.WebProxy
+	webDone   chan struct{}
+	webErr    string
+	workerVer int // версия кода воркера; 0 — не знаем
 
 	http          *http.Client
 	base          manifest // установленный набор
@@ -414,41 +416,81 @@ func (d *Daemon) startEngine() error {
 // engineIface — адаптер, которым надо ограничить движок: при включённом VPN — тот, через который
 // VPN выходит в сеть. Так обход работает для трафика мимо VPN и не трогает туннель. 0 — без
 // ограничений: VPN нет или обычный адаптер не найден.
-var engineIface = func() uint32 {
-	vpn, physical := diag.InternetRoute()
+var engineIface = func() uint32 { return ifaceFor(netRoute()) }
+
+// netRoute — VPN, через который идёт интернет, и обычный адаптер под ним; подменяется в тестах.
+var netRoute = diag.InternetRoute
+
+func ifaceFor(vpn string, physical uint32) uint32 {
 	if vpn == "" {
 		return 0
 	}
 	return physical
 }
 
-// watchVPN перезапускает движок, когда VPN включается или выключается: при VPN движок
-// ограничен обычным адаптером, без VPN снова перехватывает все.
+// watchVPN следит за VPN. Когда он включается или выключается, движок перезапускается
+// (при VPN — только на обычном адаптере), прокси Telegram бросает соединения через прежний
+// путь, а после выключения VPN сразу проверяются сервисы. Смена засчитывается, только если
+// держится два опроса подряд: VPN при подключении пересоздаёт адаптер, а дёргать движок
+// и Telegram на каждый такой всплеск незачем.
 func (d *Daemon) watchVPN(ctx context.Context) {
 	tick := time.NewTicker(vpnPoll)
 	defer tick.Stop()
+	last, _ := netRoute()
+	pending, seen := last, 0
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-tick.C:
 		}
-		want := engineIface()
+		vpn, physical := netRoute()
+		changed := vpn != last
+		if changed {
+			if vpn != pending {
+				pending, seen = vpn, 0
+			}
+			if seen++; seen < 2 {
+				continue
+			}
+			last = vpn
+		}
+
+		want := ifaceFor(vpn, physical)
 		d.mu.Lock()
 		restart := d.proc != nil && d.engineIf != want
 		d.mu.Unlock()
-		if !restart {
-			continue
+		if restart {
+			if want != 0 {
+				d.log.Info("включился VPN — обход перезапускается мимо его адаптера", "if", want)
+			} else {
+				d.log.Info("VPN выключен — обход перезапускается на всех адаптерах")
+			}
+			d.stopEngine()
+			if err := d.startEngine(); err != nil {
+				d.log.Warn("обход не перезапущен", "err", err)
+			}
 		}
-		if want != 0 {
-			d.log.Info("включился VPN — обход перезапускается мимо его адаптера", "if", want)
-		} else {
-			d.log.Info("VPN выключен — обход перезапускается на всех адаптерах")
+		if changed {
+			d.networkChanged(vpn)
 		}
-		d.stopEngine()
-		if err := d.startEngine(); err != nil {
-			d.log.Warn("обход не перезапущен", "err", err)
-		}
+	}
+}
+
+// networkChanged — интернет пошёл через VPN или снова напрямую.
+func (d *Daemon) networkChanged(vpn string) {
+	d.noteVPN(vpn)
+	d.mu.Lock()
+	tg, web := d.tg, d.web
+	d.mu.Unlock()
+	if tg != nil {
+		tg.NetworkChanged()
+	}
+	if web != nil {
+		web.NetworkChanged()
+	}
+	if vpn == "" {
+		d.recheckSoon() // без VPN проверки снова честные — не ждём следующей плановой
 	}
 }
 

@@ -45,6 +45,28 @@ func (d *Daemon) applyMiniAppsPolicy() error {
 	return nil
 }
 
+// checkWorkerVersion узнаёт версию кода воркера: прежний код сайты Telegram не открывает,
+// и окно должно попросить его обновить.
+func (d *Daemon) checkWorkerVersion(ctx context.Context, worker string) {
+	ver, err := tgproxy.WorkerVersion(ctx, d.http, worker)
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.cfg.Telegram.Worker != worker {
+		return // пока проверяли, воркер сменили
+	}
+	if err != nil {
+		d.workerVer = 0
+		if ctx.Err() == nil {
+			d.log.Warn("воркер не ответил", "worker", worker, "err", err)
+		}
+		return
+	}
+	d.workerVer = ver
+	if ver < tgproxy.WorkerVersionWeb {
+		d.log.Warn("код воркера устарел — мини-приложения через него не откроются", "worker", worker, "version", ver)
+	}
+}
+
 // startMiniAppsLocked запускает прокси для мини-приложений рядом с прокси Telegram srv.
 // Возвращает канал, который закроется, когда прокси остановится; nil — не запускался.
 func (d *Daemon) startMiniAppsLocked(ctx context.Context, srv *tgproxy.Server) chan struct{} {
@@ -53,6 +75,9 @@ func (d *Daemon) startMiniAppsLocked(ctx context.Context, srv *tgproxy.Server) c
 	}
 	web := &tgproxy.WebProxy{Addr: miniAppsAddr(d.cfg.Telegram.Port), Server: srv}
 	d.web = web
+	if worker := d.cfg.Telegram.Worker; worker != "" {
+		go d.checkWorkerVersion(ctx, worker)
+	}
 	done := make(chan struct{})
 	go func() {
 		defer close(done)

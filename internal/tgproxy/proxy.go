@@ -92,7 +92,8 @@ type Server struct {
 	pool     *pool
 	failed   map[string]time.Time
 	dnsCache map[string]dnsEntry
-	logged   map[string]*logEntry // когда какая ошибка попала в журнал
+	logged   map[string]*logEntry  // когда какая ошибка попала в журнал
+	active   map[upstream]struct{} // соединения с Telegram, через которые сейчас идут данные
 
 	cfMu          sync.Mutex
 	cfList        []string       // общие домены Cloudflare
@@ -235,11 +236,48 @@ func (s *Server) handle(ctx context.Context, client net.Conn) {
 	})
 	defer stop()
 	defer up.close()
+	s.track(up, true)
+	defer s.track(up, false)
 
 	if err := up.send(relayInit); err != nil {
 		return
 	}
 	bridge(client, up, crypto, ci.proto, func() { s.noteBadDC(dc, ci.media, up) })
+}
+
+func (s *Server) track(up upstream, on bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !on {
+		delete(s.active, up)
+		return
+	}
+	if s.active == nil {
+		s.active = map[upstream]struct{}{}
+	}
+	s.active[up] = struct{}{}
+}
+
+// NetworkChanged вызывается, когда сменилась сеть (включили или выключили VPN). Соединения,
+// открытые через прежний путь, молча перестают работать: Telegram ждал бы их таймаутов и
+// показывал «connecting…». Поэтому пул и активные соединения закрываются — Telegram сразу
+// переподключается, — а адреса из DNS и паузы неудачных путей забываются.
+func (s *Server) NetworkChanged() {
+	s.mu.Lock()
+	p := s.pool
+	active := make([]upstream, 0, len(s.active))
+	for up := range s.active {
+		active = append(active, up)
+	}
+	s.dnsCache, s.failed = nil, nil
+	s.mu.Unlock()
+	s.setPreferCF(false)
+	if p != nil {
+		p.flush()
+	}
+	for _, up := range active {
+		up.close()
+	}
 }
 
 // bridge перешифровывает трафик в обе стороны, пока одна из сторон не закроется.

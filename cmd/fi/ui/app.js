@@ -141,6 +141,7 @@ const STATE_BADGE = {
   unknown: ['off', 'Нет связи'],
   empty: ['off', 'Пусто'],
   pending: ['check', 'Проверка'],
+  vpn: ['off', 'Пауза'],
 };
 
 const VERDICT_BADGE = {
@@ -322,7 +323,7 @@ function serviceRow(service, st) {
 function mainView(st) {
   const services = st.services?.length
     ? st.services
-    : Object.keys(TITLES).map((id) => ({ id, title: TITLES[id], state: 'pending' }));
+    : Object.keys(TITLES).map((id) => ({ id, title: TITLES[id], state: st.vpn ? 'vpn' : 'pending' })); // при VPN проверки на паузе
   const checking = st.task?.kind === 'check';
   const vpn = st.vpn
     ? `<section class="panel notice">${icon('globe', 16)}<span>Интернет идёт через VPN (${esc(st.vpn)}). Обход работает только для трафика мимо VPN, проверки и автоподбор на паузе, уведомлений не будет.</span></section>`
@@ -737,6 +738,8 @@ function settingsView(st) {
                 <span class="row-text"><span class="row-title-sm">Мини-приложения</span><span class="row-sub wrap">${
                   tg.mini_apps_error
                     ? esc(tg.mini_apps_error)
+                    : tg.worker_outdated
+                    ? 'Код воркера устарел: обновите его новым docs/cf-worker.js (README, шаг 2), иначе мини-приложения через него не откроются.'
                     : `Сайты Telegram для мини-приложений и ботов — через FI. Если провайдер закрыл их адреса, нужен свой Cloudflare Worker${
                         tg.worker ? '' : ' (ниже)'
                       }. После включения перезапустите Telegram.`
