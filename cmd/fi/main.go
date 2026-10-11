@@ -47,6 +47,17 @@ func main() {
 		}
 	}
 
+	// Без WebView2 Wails не создаст окно и только пишет ошибку в журнал — человек видит,
+	// что FI «не запускается». Объясняем и предлагаем скачать; при запуске вместе с Windows
+	// не мешаем — скажем, когда окно откроют сами.
+	if !webView2Installed() {
+		log.Print("WebView2 Runtime не найден")
+		if !slices.Contains(os.Args[1:], "--hidden") {
+			offerWebView2()
+		}
+		return
+	}
+
 	ui, err := fs.Sub(uiFiles, "ui")
 	if err != nil {
 		log.Fatal(err)
