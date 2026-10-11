@@ -87,6 +87,7 @@ func main() {
 	mux.HandleFunc("POST /app/logs", t.handleLogs)
 	mux.HandleFunc("POST /app/sites/export", t.handleSitesExport)
 	mux.HandleFunc("POST /app/sites/import", t.handleSitesImport)
+	mux.HandleFunc("POST /app/strategy/import", t.handleStrategyImport)
 	mux.Handle("/", http.FileServerFS(ui))
 
 	t.notifier = notifications.New()

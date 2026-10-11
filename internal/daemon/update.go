@@ -128,8 +128,9 @@ func (d *Daemon) updateBase(ctx context.Context) error {
 
 	d.mu.Lock()
 	if err == nil {
-		d.cfg.BaseDir, d.strategies, d.base, d.baseErr = dst, strategies, m, nil
-		if !hasStrategy(strategies, d.cfg.Strategy) {
+		d.cfg.BaseDir, d.baseStrategies, d.base, d.baseErr = dst, strategies, m, nil
+		d.rebuildStrategiesLocked()
+		if !hasStrategy(d.strategies, d.cfg.Strategy) {
 			d.cfg.Strategy = "" // стратегию убрали из набора — нужен подбор
 		}
 		err = d.saveLocked()

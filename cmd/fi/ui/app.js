@@ -684,6 +684,20 @@ function settingsView(st) {
             <button class="btn sm" data-action="select" ${st.task || st.vpn ? 'disabled' : ''} title="${st.vpn ? 'Выключите VPN: через него подбор выбрал бы наугад' : ''}">Подобрать</button>
           </div>
         </div>
+        <div class="settings-row column">
+          <span class="row-text"><span class="row-title-sm">Свои стратегии</span><span class="row-sub wrap">Из .bat другого набора zapret или файла с аргументами winws. FI пропустит только безопасные параметры и файлы из своего набора; свои стратегии участвуют в подборе.</span></span>
+          ${
+            (st.custom_strategies ?? []).length
+              ? `<div class="chips">${st.custom_strategies
+                  .map(
+                    (name) =>
+                      `<button class="chip" data-action="custom-remove" data-name="${esc(name)}" title="Удалить" ${st.task ? 'disabled' : ''}>${esc(strategyLabel(name))} ×</button>`,
+                  )
+                  .join('')}</div>`
+              : ''
+          }
+          <div class="button-row"><button class="btn sm" data-action="custom-add" ${st.task || !st.strategies ? 'disabled' : ''}>Добавить из файла…</button></div>
+        </div>
         <div class="settings-row">
           <span class="row-text"><span class="row-title-sm">Набор стратегий</span><span class="row-sub" title="${esc(baseLine(st.base))}">${esc(baseLine(st.base))}</span></span>
           ${
@@ -771,7 +785,7 @@ function unavailableView() {
 const root = document.getElementById('app');
 let lastHTML = '';
 
-const FOCUS_KEYS = ['action', 'screen', 'mode', 'host', 'service', 'fix', 'game', 'path', 'theme'];
+const FOCUS_KEYS = ['action', 'screen', 'mode', 'host', 'service', 'fix', 'game', 'path', 'theme', 'name'];
 
 function render() {
   const html = view();
@@ -1006,6 +1020,12 @@ document.addEventListener('click', (event) => {
       break;
     case 'tg-shared-cf':
       command('set_telegram_shared_cf', { on: !state.status?.telegram?.shared_cf });
+      break;
+    case 'custom-add':
+      fileAction('/app/strategy/import', (d) => (d.name ? `Стратегия «${d.name}» добавлена — её можно выбрать в списке или запустить подбор` : ''));
+      break;
+    case 'custom-remove':
+      command('remove_custom_strategy', { name: el.dataset.name });
       break;
     case 'tg-mini-apps':
       command('set_telegram_mini_apps', { on: !state.status?.telegram?.mini_apps });

@@ -16,6 +16,7 @@ import (
 	"runtime"
 	"strings"
 	"time"
+	"unicode"
 
 	"fi/internal/diag"
 	"fi/internal/logfile"
@@ -188,6 +189,79 @@ func (t *tray) handleSitesImport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"added": res.Added, "status": res.Status})
+}
+
+// handleStrategyImport добавляет свою стратегию из .bat другого набора или файла с аргументами
+// winws. Проверяет её служба: окно только читает файл, выбранный человеком.
+func (t *tray) handleStrategyImport(w http.ResponseWriter, r *http.Request) {
+	path, err := t.app.Dialog.OpenFile().
+		SetTitle("Своя стратегия FI").
+		AddFilter("Стратегия (.bat, .txt)", "*.bat;*.cmd;*.txt").
+		CanChooseFiles(true).
+		AttachToWindow(t.window).
+		PromptForSingleSelection()
+	if err != nil || path == "" {
+		resp := map[string]string{}
+		if err != nil {
+			resp["error"] = err.Error()
+		}
+		writeJSON(w, http.StatusOK, resp)
+		return
+	}
+	data, err := readLimited(path, 64<<10)
+	if err != nil {
+		writeJSON(w, http.StatusOK, map[string]string{"error": err.Error()})
+		return
+	}
+	name := strategyFileName(path)
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+	var status json.RawMessage
+	if err := t.call(ctx, "add_custom_strategy", map[string]string{"name": name, "text": string(data)}, &status); err != nil {
+		writeJSON(w, http.StatusOK, map[string]string{"error": "Стратегия не добавлена: " + err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"name": name, "status": status})
+}
+
+func readLimited(path string, limit int64) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	data, err := io.ReadAll(io.LimitReader(f, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > limit {
+		return nil, errors.New("файл слишком большой для стратегии")
+	}
+	return data, nil
+}
+
+// strategyFileName — название стратегии из имени файла: «general (ALT5).bat» → «general (ALT5)».
+// Знаки, которых нет в названиях, заменяются дефисом.
+func strategyFileName(path string) string {
+	base := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
+	var b strings.Builder
+	n := 0
+	for _, r := range base {
+		if n == 40 {
+			break
+		}
+		switch {
+		case unicode.IsLetter(r), unicode.IsDigit(r), strings.ContainsRune(" _().,+-", r):
+			b.WriteRune(r)
+		default:
+			b.WriteRune('-')
+		}
+		n++
+	}
+	if name := strings.TrimSpace(b.String()); name != "" {
+		return name
+	}
+	return "стратегия"
 }
 
 // handleLogs открывает папку с журналом службы.

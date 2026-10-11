@@ -93,6 +93,21 @@ func (d *Daemon) Handle(ctx context.Context, method string, params json.RawMessa
 		if err = decode(params, &on); err == nil {
 			err = d.SetTelegramSharedCF(on.On)
 		}
+	case "add_custom_strategy":
+		var p struct {
+			Name string `json:"name"`
+			Text string `json:"text"`
+		}
+		if err = decode(params, &p); err == nil {
+			err = d.AddCustomStrategy(p.Name, p.Text)
+		}
+	case "remove_custom_strategy":
+		var p struct {
+			Name string `json:"name"`
+		}
+		if err = decode(params, &p); err == nil {
+			err = d.RemoveCustomStrategy(p.Name)
+		}
 	case "set_telegram_mini_apps":
 		if err = decode(params, &on); err == nil {
 			err = d.SetTelegramMiniApps(on.On)

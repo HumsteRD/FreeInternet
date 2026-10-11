@@ -65,6 +65,7 @@ type Status struct {
 	Strategy     string          `json:"strategy,omitempty"`
 	Strategies   int             `json:"strategies"`
 	StrategyList []string        `json:"strategy_list"` // что можно выбрать вручную
+	Custom       []string        `json:"custom_strategies"`
 	GameMode     string          `json:"game_mode"`
 	Games        []string        `json:"games"`
 	GameList     []strategy.Game `json:"game_profiles"`
@@ -93,18 +94,21 @@ type Daemon struct {
 	mu         sync.Mutex
 	runCtx     context.Context
 	cfg        config.Config
-	strategies []strategy.Strategy
-	baseErr    error
-	proc       *engine.Process
-	engineIf   uint32 // движок перехватывает только этот адаптер, потому что включён VPN; 0 — все
-	engineErr  string
-	conflict   []string // другие обходы, найденные при последнем запуске движка
-	restarts   []time.Time
-	task       *Task
-	cancelTask context.CancelFunc
-	services   []Service
-	checkedAt  time.Time
-	lastSelect time.Time
+	strategies []strategy.Strategy // набор и свои — из них выбирают и подбирают
+	// baseStrategies — стратегии установленного набора, custom — свои стратегии человека.
+	baseStrategies []strategy.Strategy
+	custom         []strategy.Strategy
+	baseErr        error
+	proc           *engine.Process
+	engineIf       uint32 // движок перехватывает только этот адаптер, потому что включён VPN; 0 — все
+	engineErr      string
+	conflict       []string // другие обходы, найденные при последнем запуске движка
+	restarts       []time.Time
+	task           *Task
+	cancelTask     context.CancelFunc
+	services       []Service
+	checkedAt      time.Time
+	lastSelect     time.Time
 
 	tg      *tgproxy.Server
 	tgStop  context.CancelFunc
@@ -156,7 +160,9 @@ func New(dataDir string, log *slog.Logger) (*Daemon, error) {
 		runCtx:  context.Background(),
 		http:    &http.Client{Timeout: 5 * time.Minute},
 	}
-	d.strategies, d.base, d.baseErr = loadBase(cfg.BaseDir)
+	d.baseStrategies, d.base, d.baseErr = loadBase(cfg.BaseDir)
+	d.loadCustom()
+	d.rebuildStrategiesLocked()
 	d.ensureTelegramSecret()
 	d.ensureFamilies()
 	d.loadCFCache()
@@ -230,6 +236,7 @@ func (d *Daemon) Status() Status {
 		Strategy:     d.cfg.Strategy,
 		Strategies:   len(d.strategies),
 		StrategyList: strategyNames(d.strategies),
+		Custom:       d.customNamesLocked(),
 		GameMode:     d.cfg.GameMode,
 		Games:        slices.Clone(d.cfg.Games),
 		GameList:     strategy.Games,
