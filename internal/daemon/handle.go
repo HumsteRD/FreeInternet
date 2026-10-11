@@ -93,6 +93,10 @@ func (d *Daemon) Handle(ctx context.Context, method string, params json.RawMessa
 		if err = decode(params, &on); err == nil {
 			err = d.SetTelegramSharedCF(on.On)
 		}
+	case "set_telegram_mini_apps":
+		if err = decode(params, &on); err == nil {
+			err = d.SetTelegramMiniApps(on.On)
+		}
 	case "set_telegram_worker":
 		var p struct {
 			Host string `json:"host"`

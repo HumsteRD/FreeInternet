@@ -66,6 +66,9 @@ type Telegram struct {
 	// SharedCF — ходить в Telegram и через общие домены Cloudflare проекта tg-ws-proxy,
 	// если прямой путь закрыт.
 	SharedCF bool `json:"shared_cf"`
+	// MiniApps — пускать сайты Telegram для мини-приложений через локальный прокси FI
+	// (порт Port+1), а если их адреса закрыты — через Worker.
+	MiniApps bool `json:"mini_apps"`
 }
 
 func Default() Config {

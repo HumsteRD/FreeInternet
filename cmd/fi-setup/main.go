@@ -234,6 +234,7 @@ func runUninstall(quiet bool) error {
 		return fmt.Errorf("служба: %w", err)
 	}
 	winsvc.KillProcesses("fi.exe", 0)
+	winsvc.SetTelegramPAC("") // окна мини-приложений Telegram снова ходят напрямую
 	removeAutostart()
 	os.Remove(shortcutPath())
 	os.Remove(desktopPath())

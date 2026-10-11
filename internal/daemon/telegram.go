@@ -31,6 +31,9 @@ type TelegramStatus struct {
 	SharedCF  bool   `json:"shared_cf"`
 	CFDomains int    `json:"cf_domains"`
 	Error     string `json:"error,omitempty"`
+	// MiniApps — сайты Telegram для мини-приложений идут через FI; MiniAppsError — почему не вышло.
+	MiniApps      bool   `json:"mini_apps"`
+	MiniAppsError string `json:"mini_apps_error,omitempty"`
 	tgproxy.Stats
 }
 
@@ -72,6 +75,10 @@ func (d *Daemon) telegramStatusLocked() TelegramStatus {
 		SharedCF:  d.cfg.Telegram.SharedCF,
 		CFDomains: len(d.tgCF),
 		Error:     d.tgErr,
+		MiniApps:  d.cfg.Telegram.MiniApps,
+	}
+	if st.Enabled && st.MiniApps {
+		st.MiniAppsError = d.webErr
 	}
 	if secret, err := hex.DecodeString(d.cfg.Telegram.Secret); err == nil && len(secret) == 16 {
 		st.Link = tgproxy.Link(st.Address, secret)
@@ -96,7 +103,7 @@ func (d *Daemon) SetTelegram(on bool) error {
 	} else {
 		d.stopTelegram()
 	}
-	return nil
+	return d.applyMiniAppsPolicy()
 }
 
 const (
@@ -237,7 +244,8 @@ func (d *Daemon) startTelegram() {
 	}
 	ctx, cancel := context.WithCancel(d.runCtx)
 	done := make(chan struct{})
-	d.tg, d.tgStop, d.tgDone, d.tgErr = srv, cancel, done, ""
+	d.tg, d.tgStop, d.tgDone, d.tgErr, d.webErr = srv, cancel, done, "", ""
+	d.webDone = d.startMiniAppsLocked(ctx, srv)
 
 	go func() {
 		defer close(done)
@@ -256,11 +264,14 @@ func (d *Daemon) startTelegram() {
 // stopTelegram останавливает прокси и дожидается закрытия соединений.
 func (d *Daemon) stopTelegram() {
 	d.mu.Lock()
-	cancel, done := d.tgStop, d.tgDone
-	d.tg, d.tgStop, d.tgDone = nil, nil, nil
+	cancel, done, webDone := d.tgStop, d.tgDone, d.webDone
+	d.tg, d.tgStop, d.tgDone, d.web, d.webDone = nil, nil, nil, nil, nil
 	d.mu.Unlock()
 	if cancel != nil {
 		cancel()
 		<-done
+		if webDone != nil {
+			<-webDone
+		}
 	}
 }

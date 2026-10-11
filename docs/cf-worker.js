@@ -1,4 +1,5 @@
-// Cloudflare Worker для FI: принимает WebSocket и перекладывает байты в дата-центр Telegram.
+// Cloudflare Worker для FI: принимает WebSocket и перекладывает байты в дата-центр Telegram
+// (?dc=N) или на сайт Telegram для мини-приложений (?host=telegram.org&port=443).
 // Нужен там, где адреса Telegram закрыты по IP, а Cloudflare открыт.
 //
 // Как поставить:
@@ -29,6 +30,15 @@ const DC_TEST = {
   3: "149.154.175.117",
 };
 
+// Сайты Telegram, нужные мини-приложениям. К другим адресам воркер не пускает,
+// чтобы его нельзя было использовать как открытый прокси.
+const WEB = ["telegram.org", "t.me", "telegram.me", "telesco.pe", "cdn-telegram.org", "telegra.ph", "graph.org", "tdesktop.com", "fragment.com"];
+
+function isTelegramWeb(host) {
+  host = host.toLowerCase().replace(/\.$/, "");
+  return WEB.some((d) => host === d || host.endsWith("." + d));
+}
+
 export default {
   async fetch(request) {
     const url = new URL(request.url);
@@ -36,16 +46,26 @@ export default {
       return new Response("FI worker: работает", { status: 200 });
     }
 
-    const table = url.searchParams.get("test") === "1" ? DC_TEST : DC;
-    const address = table[Number(url.searchParams.get("dc"))];
-    if (!address) {
-      return new Response("неизвестный дата-центр", { status: 400 });
+    let target;
+    const host = url.searchParams.get("host");
+    if (host) {
+      if (!isTelegramWeb(host) || url.searchParams.get("port") !== "443") {
+        return new Response("можно только сайты Telegram на порту 443", { status: 403 });
+      }
+      target = { hostname: host, port: 443 };
+    } else {
+      const table = url.searchParams.get("test") === "1" ? DC_TEST : DC;
+      const address = table[Number(url.searchParams.get("dc"))];
+      if (!address) {
+        return new Response("неизвестный дата-центр", { status: 400 });
+      }
+      target = { hostname: address, port: 443 };
     }
 
     const [client, server] = Object.values(new WebSocketPair());
     server.accept();
 
-    const socket = connect({ hostname: address, port: 443 });
+    const socket = connect(target);
     const writer = socket.writable.getWriter();
 
     server.addEventListener("message", (event) => {

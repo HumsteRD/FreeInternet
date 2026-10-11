@@ -106,12 +106,15 @@ type Daemon struct {
 	checkedAt  time.Time
 	lastSelect time.Time
 
-	tg     *tgproxy.Server
-	tgStop context.CancelFunc
-	tgDone chan struct{}
-	tgErr  string
-	tgCF   []string  // общие домены Cloudflare (tg-ws-proxy)
-	tgCFAt time.Time // когда их обновляли
+	tg      *tgproxy.Server
+	tgStop  context.CancelFunc
+	tgDone  chan struct{}
+	tgErr   string
+	tgCF    []string  // общие домены Cloudflare (tg-ws-proxy)
+	tgCFAt  time.Time // когда их обновляли
+	web     *tgproxy.WebProxy
+	webDone chan struct{}
+	webErr  string
 
 	http          *http.Client
 	base          manifest // установленный набор
@@ -178,6 +181,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 		}
 	}
 	d.startTelegram()
+	d.applyMiniAppsPolicy() // после обновления FI или ручной правки реестра
 	d.tasks.Add(2)
 	go func() {
 		defer d.tasks.Done()

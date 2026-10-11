@@ -719,6 +719,16 @@ function settingsView(st) {
                 }</span></span>
                 <button class="toggle ${tg.shared_cf ? 'on' : ''}" role="switch" aria-checked="${Boolean(tg.shared_cf)}" aria-label="Общие домены Cloudflare" data-action="tg-shared-cf"></button>
               </div>
+              <div class="settings-row">
+                <span class="row-text"><span class="row-title-sm">Мини-приложения</span><span class="row-sub wrap">${
+                  tg.mini_apps_error
+                    ? esc(tg.mini_apps_error)
+                    : `Сайты Telegram для мини-приложений и ботов — через FI. Если провайдер закрыл их адреса, нужен свой Cloudflare Worker${
+                        tg.worker ? '' : ' (ниже)'
+                      }. После включения перезапустите Telegram.`
+                }</span></span>
+                <button class="toggle ${tg.mini_apps ? 'on' : ''}" role="switch" aria-checked="${Boolean(tg.mini_apps)}" aria-label="Мини-приложения Telegram" data-action="tg-mini-apps"></button>
+              </div>
               <div class="settings-row column">
                 <span class="row-text"><span class="row-title-sm">Свой Cloudflare Worker</span><span class="row-sub wrap">Личный путь надёжнее общих доменов: его никто не делит с вами. Как создать — в README. Пусто — без воркера.</span></span>
                 <form class="input-row" data-form="worker">
@@ -996,6 +1006,9 @@ document.addEventListener('click', (event) => {
       break;
     case 'tg-shared-cf':
       command('set_telegram_shared_cf', { on: !state.status?.telegram?.shared_cf });
+      break;
+    case 'tg-mini-apps':
+      command('set_telegram_mini_apps', { on: !state.status?.telegram?.mini_apps });
       break;
     case 'tg-copy':
       copyTelegram();
