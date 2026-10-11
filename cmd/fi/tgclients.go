@@ -75,6 +75,7 @@ func openInClient(path, link string) error {
 // traySettings — настройки окна, которые принадлежат пользователю, а не службе.
 type traySettings struct {
 	TelegramClient string `json:"telegram_client,omitempty"` // чем открывать ссылку прокси
+	Theme          string `json:"theme,omitempty"`           // тема окна: dark, gray, light
 }
 
 func traySettingsPath() string {

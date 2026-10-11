@@ -1,4 +1,5 @@
-/* Токены — из docs/design/build.mjs. Тёмная тема основная, светлая — вместе с системной. */
+/* Токены — из docs/design/build.mjs. Тема выбирается в настройках (data-theme на <html>):
+   тёмная — основная, ещё серая и светлая. Цвет фона окна для каждой — в themes.go. */
 :root {
   color-scheme: dark;
   --bg: #0B0A0D;
@@ -30,35 +31,50 @@
   --mono: 'JetBrains Mono', 'Cascadia Mono', Consolas, monospace;
 }
 
-@media (prefers-color-scheme: light) {
-  :root {
-    color-scheme: light;
-    --bg: #F6F4F8;
-    --sunken: #EDEAF0;
-    --panel: #FFFFFF;
-    --raised: #F3F0F5;
-    --hover: #EAE6EE;
-    --line: #E6E2EA;
-    --line-strong: #D4CEDA;
-    --text: #16131A;
-    --text-2: #5E5865;
-    --text-3: #8E8895;
-    --violet: #6E3FD8;
-    --violet-hover: #7B4EE3;
-    --violet-pressed: #5E33C0;
-    --violet-text: #6437CC;
-    --violet-tint: rgba(110, 63, 216, 0.10);
-    --violet-line: rgba(110, 63, 216, 0.40);
-    --red: #D1343A;
-    --red-text: #C42B31;
-    --red-tint: rgba(209, 52, 58, 0.10);
-    --amber-text: #9A6412;
-    --amber-tint: rgba(201, 138, 43, 0.14);
-    --neutral-tint: rgba(22, 19, 26, 0.05);
-    --seg-sel: #FFFFFF;
-    --knob-off: #FFFFFF;
-    --glow: radial-gradient(closest-side, rgba(229, 72, 77, 0.10), rgba(110, 63, 216, 0.05) 60%, transparent);
-  }
+:root[data-theme="gray"] {
+  --bg: #1E1F22;
+  --sunken: #18191C;
+  --panel: #2B2D31;
+  --raised: #313338;
+  --hover: #3A3C42;
+  --line: #3A3C41;
+  --line-strong: #4B4E55;
+  --text: #F2F3F5;
+  --text-2: #B5BAC1;
+  --text-3: #80848E;
+  --neutral-tint: rgba(255, 255, 255, 0.07);
+  --seg-sel: #43454B;
+  --knob-off: #B5BAC1;
+  --glow: radial-gradient(closest-side, rgba(229, 72, 77, 0.12), rgba(140, 92, 242, 0.06) 60%, transparent);
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+  --bg: #F6F4F8;
+  --sunken: #EDEAF0;
+  --panel: #FFFFFF;
+  --raised: #F3F0F5;
+  --hover: #EAE6EE;
+  --line: #E6E2EA;
+  --line-strong: #D4CEDA;
+  --text: #16131A;
+  --text-2: #5E5865;
+  --text-3: #8E8895;
+  --violet: #6E3FD8;
+  --violet-hover: #7B4EE3;
+  --violet-pressed: #5E33C0;
+  --violet-text: #6437CC;
+  --violet-tint: rgba(110, 63, 216, 0.10);
+  --violet-line: rgba(110, 63, 216, 0.40);
+  --red: #D1343A;
+  --red-text: #C42B31;
+  --red-tint: rgba(209, 52, 58, 0.10);
+  --amber-text: #9A6412;
+  --amber-tint: rgba(201, 138, 43, 0.14);
+  --neutral-tint: rgba(22, 19, 26, 0.05);
+  --seg-sel: #FFFFFF;
+  --knob-off: #FFFFFF;
+  --glow: radial-gradient(closest-side, rgba(229, 72, 77, 0.10), rgba(110, 63, 216, 0.05) 60%, transparent);
 }
 
 * { box-sizing: border-box; }

@@ -64,6 +64,7 @@ func main() {
 	mux.HandleFunc("POST /app/minimize", t.handleMinimize)
 	mux.HandleFunc("POST /app/clipboard", t.handleClipboard)
 	mux.HandleFunc("POST /app/autostart", t.handleAutostart)
+	mux.HandleFunc("POST /app/theme", t.handleTheme)
 	mux.HandleFunc("POST /app/telegram/open", t.handleTelegramOpen)
 	mux.HandleFunc("POST /app/telegram/copy", t.handleTelegramCopy)
 	mux.HandleFunc("POST /app/telegram/clients", t.handleTelegramClients)
@@ -114,7 +115,7 @@ func main() {
 		Frameless:        true,
 		Hidden:           true,
 		HideOnEscape:     true,
-		BackgroundColour: application.NewRGB(0x0B, 0x0A, 0x0D),
+		BackgroundColour: themeBackgrounds[themeOf(loadTraySettings())],
 		URL:              "/",
 	})
 	t.window.RegisterHook(events.Common.WindowClosing, func(e *application.WindowEvent) {
@@ -623,7 +624,9 @@ func (t *tray) openTelegram(path string) error {
 	}
 	if path != "" {
 		if err := openInClient(path, link); err == nil {
-			saveTraySettings(traySettings{TelegramClient: path})
+			s := loadTraySettings()
+			s.TelegramClient = path
+			saveTraySettings(s)
 			return nil
 		}
 	}

@@ -91,7 +91,37 @@ const state = {
   worker: null, // домен Cloudflare Worker, пока его правят в поле; null — показываем сохранённый
   tgClients: null, // клиенты Telegram на компьютере (Telegram, AyuGram…); null — ещё не искали
   notice: '', // что получилось: «Отчёт сохранён…»; сбрасывается при переходе между экранами
+  theme: document.documentElement.dataset.theme || 'dark', // dark, gray, light
 };
+
+const THEMES = [['dark', 'Тёмная'], ['gray', 'Серая'], ['light', 'Светлая']];
+
+function applyTheme(theme) {
+  if (!THEMES.some(([value]) => value === theme)) return;
+  state.theme = theme;
+  document.documentElement.dataset.theme = theme;
+  try {
+    localStorage.setItem('fi-theme', theme);
+  } catch {}
+}
+
+async function loadTheme() {
+  const data = await postJSON('/app/theme');
+  if (data?.theme && data.theme !== state.theme) {
+    applyTheme(data.theme);
+    render();
+  }
+}
+
+async function setTheme(theme) {
+  applyTheme(theme); // сразу, не дожидаясь ответа
+  render();
+  const data = await postJSON('/app/theme', { theme });
+  if (data?.error) {
+    state.message = data.error;
+    render();
+  }
+}
 
 const TITLES = { youtube: 'YouTube', discord: 'Discord', telegram: 'Telegram', calls: 'Звонки', sites: 'Сайты' };
 
@@ -99,7 +129,7 @@ const SERVICE_META = {
   youtube: { icon: 'play', sub: 'Сайт и видео', hint: 'Видео, превью' },
   discord: { icon: 'headset', sub: 'Сайт, вход и файлы', hint: 'Вход, сообщения' },
   telegram: { icon: 'bubble', sub: 'Сайт и веб-клиент', hint: 'Сообщения, медиа' },
-  calls: { icon: 'phone', sub: 'Голос в Discord и звонки', hint: 'Голос, видеосвязь' },
+  calls: { icon: 'phone', sub: 'Звонки в браузере и мессенджерах', hint: 'Голос, видеосвязь' },
   sites: { icon: 'globe', sub: '', hint: 'Любой адрес' },
 };
 
@@ -292,7 +322,7 @@ function mainView(st) {
     : Object.keys(TITLES).map((id) => ({ id, title: TITLES[id], state: 'pending' }));
   const checking = st.task?.kind === 'check';
   const vpn = st.vpn
-    ? `<section class="panel notice">${icon('globe', 16)}<span>Интернет идёт через VPN (${esc(st.vpn)}): статусы показывают сеть VPN, а не провайдера, и автоподбор пока не запускается.</span></section>`
+    ? `<section class="panel notice">${icon('globe', 16)}<span>Интернет идёт через VPN (${esc(st.vpn)}). Обход работает только для трафика мимо VPN, проверки и автоподбор на паузе, уведомлений не будет.</span></section>`
     : '';
   return `${heroView(st)}
     ${errorLine()}
@@ -605,6 +635,13 @@ function settingsView(st) {
           <span class="row-text"><span class="row-title-sm">Запускать вместе с Windows</span><span class="row-sub wrap">Значок появится в трее сразу после входа в систему</span></span>
           <button class="toggle ${state.autostart ? 'on' : ''}" role="switch" aria-checked="${Boolean(state.autostart)}" aria-label="Запускать вместе с Windows" data-action="autostart" ${state.autostart === null ? 'disabled' : ''}></button>
         </div>
+        <div class="settings-row column">
+          <span class="row-text"><span class="row-title-sm">Тема</span></span>
+          <div class="seg" role="radiogroup" aria-label="Тема">${THEMES.map(
+            ([value, label]) =>
+              `<button role="radio" aria-checked="${state.theme === value}" class="${state.theme === value ? 'on' : ''}" data-action="theme" data-theme="${value}">${label}</button>`,
+          ).join('')}</div>
+        </div>
         <div class="settings-row">
           <span class="row-text"><span class="row-title-sm">Версия</span><span class="row-sub" title="${esc(appLine(st.app))}">${esc(appLine(st.app))}</span></span>
           ${appButton(st)}
@@ -623,7 +660,7 @@ function settingsView(st) {
       <div class="section-label"><span>Обход</span></div>
       <div class="panel">
         <div class="settings-row">
-          <span class="row-text"><span class="row-title-sm">Чинить автоматически</span><span class="row-sub wrap">Если сервис перестал работать и через минуту это подтвердилось, подобрать стратегию заново. Пока включён VPN, не срабатывает.</span></span>
+          <span class="row-text"><span class="row-title-sm">Чинить автоматически</span><span class="row-sub wrap">Если сервис перестал работать и через минуту это подтвердилось, подобрать стратегию заново. Пока включён VPN, проверки на паузе.</span></span>
           <button class="toggle ${st.auto_fix ? 'on' : ''}" role="switch" aria-checked="${st.auto_fix}" aria-label="Чинить автоматически" data-action="auto-fix"></button>
         </div>
         <div class="settings-row column">
@@ -721,7 +758,7 @@ function unavailableView() {
 const root = document.getElementById('app');
 let lastHTML = '';
 
-const FOCUS_KEYS = ['action', 'screen', 'mode', 'host', 'service', 'fix', 'game', 'path'];
+const FOCUS_KEYS = ['action', 'screen', 'mode', 'host', 'service', 'fix', 'game', 'path', 'theme'];
 
 function render() {
   const html = view();
@@ -939,6 +976,9 @@ document.addEventListener('click', (event) => {
     case 'autostart':
       setAutostart(!state.autostart);
       break;
+    case 'theme':
+      setTheme(el.dataset.theme);
+      break;
     case 'tg-toggle':
       command('set_telegram', { on: !state.status?.telegram?.enabled });
       break;
@@ -1128,4 +1168,5 @@ window.fi = {
   },
 };
 
+loadTheme();
 refresh().then(schedule);
