@@ -2,10 +2,26 @@ package config
 
 import (
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
 )
+
+func TestLoadCorruptKeepsCopy(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	broken := []byte(`{"sites":[{"host":"rutracker.org"}`)
+	if err := os.WriteFile(path, broken, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load(path)
+	if err == nil || !c.Enabled {
+		t.Fatalf("повреждённый файл: %+v, %v", c, err)
+	}
+	if saved, _ := os.ReadFile(path + ".bad"); string(saved) != string(broken) {
+		t.Fatalf("копия повреждённых настроек: %q", saved)
+	}
+}
 
 func TestLoadSave(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")

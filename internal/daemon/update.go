@@ -65,16 +65,27 @@ func (d *Daemon) StartBaseUpdate() error {
 
 	go func() {
 		defer d.tasks.Done()
-		defer d.endTask()
+		d.mu.Lock()
+		had := d.cfg.Strategy != "" // первую стратегию подбирают из окна, а не здесь
+		d.mu.Unlock()
 		err := d.updateBase(ctx)
 		d.mu.Lock()
 		d.updateErr = ""
 		if err != nil {
 			d.updateErr = err.Error()
 		}
+		// Стратегию убрали из нового набора: без подбора обход так и остался бы выключенным.
+		reselect := had && err == nil && d.cfg.Enabled && d.cfg.AutoFix && d.cfg.Strategy == "" && d.baseErr == nil
 		d.mu.Unlock()
+		d.endTask()
 		if err != nil {
 			d.log.Error("набор стратегий не обновлён", "err", err)
+		}
+		if reselect {
+			d.log.Info("выбранной стратегии нет в новом наборе — подбираю заново")
+			if err := d.startSelect(false); err != nil {
+				d.log.Warn("подбор не запущен", "err", err)
+			}
 		}
 	}()
 	return nil

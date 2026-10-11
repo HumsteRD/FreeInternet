@@ -94,7 +94,12 @@ func Load(path string) (Config, error) {
 		return c, err
 	}
 	if err := json.Unmarshal(data, &c); err != nil {
-		return Default(), fmt.Errorf("%s: %w", path, err)
+		// Служба сразу перезапишет файл настройками по умолчанию — копия сохраняет список
+		// сайтов и остальное, чтобы их можно было вернуть руками.
+		if werr := os.WriteFile(path+".bad", data, 0o644); werr != nil {
+			err = errors.Join(err, werr)
+		}
+		return Default(), fmt.Errorf("%s (копия — %s.bad): %w", path, path, err)
 	}
 	return c, nil
 }
