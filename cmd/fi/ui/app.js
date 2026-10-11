@@ -185,14 +185,17 @@ function baseLine(base = {}) {
 function appLine(app = {}) {
   if (app.error) return app.error;
   const text = app.version ? `FI ${app.version}` : 'Версия неизвестна';
-  if (!app.configured) return `${text} · автообновление не настроено в этой сборке`;
   if (app.update_available && app.latest) return `${text} · доступна ${app.latest}`;
   return app.checked_at ? `${text} · последняя версия` : text;
 }
 
 function appButton(st) {
-  if (!st.app?.configured) return '';
-  return st.app.update_available
+  const app = st.app ?? {};
+  if (app.update_available && !app.configured) {
+    // Сборка без ключа обновлений сама не ставит новую версию — открываем страницу загрузки.
+    return `<button class="btn sm primary" data-action="app-release">Скачать</button>`;
+  }
+  return app.update_available
     ? `<button class="btn sm primary" data-action="app-update" ${st.task ? 'disabled' : ''}>Обновить</button>`
     : `<button class="btn sm ghost" data-action="app-check" ${st.task ? 'disabled' : ''}>Проверить</button>`;
 }
@@ -1078,6 +1081,14 @@ document.addEventListener('click', (event) => {
       break;
     case 'app-update':
       command('update_app');
+      break;
+    case 'app-release':
+      postJSON('/app/release').then((data) => {
+        if (data?.error) {
+          state.message = data.error;
+          render();
+        }
+      });
       break;
     case 'app-auto':
       command('set_app_auto_update', { on: !state.status?.app?.auto_update });

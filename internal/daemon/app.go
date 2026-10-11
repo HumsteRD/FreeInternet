@@ -25,6 +25,7 @@ type AppStatus struct {
 	Version         string    `json:"version"`
 	Configured      bool      `json:"configured"` // сборка знает, где брать обновления
 	Latest          string    `json:"latest,omitempty"`
+	Page            string    `json:"page,omitempty"` // откуда скачать новую версию вручную, если сборка не обновляется сама
 	UpdateAvailable bool      `json:"update_available"`
 	CheckedAt       time.Time `json:"checked_at,omitzero"`
 	AutoUpdate      bool      `json:"auto_update"`
@@ -32,7 +33,7 @@ type AppStatus struct {
 }
 
 func (d *Daemon) appStatusLocked() AppStatus {
-	return AppStatus{
+	st := AppStatus{
 		Version:         Version,
 		Configured:      appupdate.Configured(),
 		Latest:          d.appLatest.Version,
@@ -41,16 +42,24 @@ func (d *Daemon) appStatusLocked() AppStatus {
 		AutoUpdate:      d.cfg.AppUpdate,
 		Error:           d.appErr,
 	}
+	if st.UpdateAvailable && !st.Configured {
+		st.Page = appupdate.ReleasesPage()
+	}
+	return st
 }
 
-// CheckAppUpdate узнаёт, не вышла ли новая версия FI.
+// CheckAppUpdate узнаёт, не вышла ли новая версия FI. Сборка без ключа обновлений смотрит
+// последнюю версию на GitHub: поставить её сама не может, но окно предложит скачать.
 func (d *Daemon) CheckAppUpdate(ctx context.Context) error {
-	if !appupdate.Configured() {
-		return appupdate.ErrNotConfigured
-	}
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	m, err := appupdate.Check(ctx, d.http)
+	var m appupdate.Manifest
+	var err error
+	if appupdate.Configured() {
+		m, err = appupdate.Check(ctx, d.http)
+	} else {
+		m.Version, err = appupdate.LatestRelease(ctx, d.http)
+	}
 
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -138,7 +147,8 @@ func (d *Daemon) updateApp(ctx context.Context) (launched bool, err error) {
 // maybeAppUpdate раз в сутки проверяет новую версию FI и ставит её, если включено.
 func (d *Daemon) maybeAppUpdate(ctx context.Context) {
 	d.mu.Lock()
-	due := appupdate.Configured() && Version != "dev" && d.cfg.AppUpdate && d.task == nil &&
+	configured := appupdate.Configured()
+	due := Version != "dev" && (d.cfg.AppUpdate || !configured) && d.task == nil &&
 		time.Since(d.appChecked) > appCheckEvery
 	d.mu.Unlock()
 	if !due {
@@ -155,6 +165,9 @@ func (d *Daemon) maybeAppUpdate(ctx context.Context) {
 		return
 	}
 	d.log.Info("вышла новая версия FI", "version", latest)
+	if !configured {
+		return // поставить сама сборка не может — окно предложит скачать
+	}
 	if err := d.StartAppUpdate(); err != nil {
 		d.log.Warn("обновление FI не запущено", "err", err)
 	}

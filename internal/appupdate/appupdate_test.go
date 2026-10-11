@@ -113,3 +113,25 @@ func TestNotConfigured(t *testing.T) {
 		t.Fatalf("Check без настройки: %v", err)
 	}
 }
+
+func TestLatestRelease(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/repos/"+ReleasesRepo+"/releases/latest" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Write([]byte(`{"tag_name":"v0.3.0","html_url":"https://github.com/x"}`))
+	}))
+	defer srv.Close()
+	old := githubAPI
+	githubAPI = srv.URL
+	defer func() { githubAPI = old }()
+
+	v, err := LatestRelease(context.Background(), srv.Client())
+	if err != nil || v != "0.3.0" {
+		t.Fatalf("LatestRelease = %q, %v", v, err)
+	}
+	if !Newer(v, "0.2.2") {
+		t.Fatal("0.3.0 должна быть новее 0.2.2")
+	}
+}

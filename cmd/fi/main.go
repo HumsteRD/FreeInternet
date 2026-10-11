@@ -27,6 +27,7 @@ import (
 	"github.com/wailsapp/wails/v3/pkg/events"
 	"github.com/wailsapp/wails/v3/pkg/services/notifications"
 
+	"fi/internal/appupdate"
 	"fi/internal/diag"
 	"fi/internal/ipc"
 	"fi/internal/trayicon"
@@ -65,6 +66,7 @@ func main() {
 	mux.HandleFunc("POST /app/clipboard", t.handleClipboard)
 	mux.HandleFunc("POST /app/autostart", t.handleAutostart)
 	mux.HandleFunc("POST /app/theme", t.handleTheme)
+	mux.HandleFunc("POST /app/release", t.handleRelease)
 	mux.HandleFunc("POST /app/telegram/open", t.handleTelegramOpen)
 	mux.HandleFunc("POST /app/telegram/copy", t.handleTelegramCopy)
 	mux.HandleFunc("POST /app/telegram/clients", t.handleTelegramClients)
@@ -190,6 +192,11 @@ type status struct {
 	Base      struct {
 		Version string `json:"version"`
 	} `json:"base"`
+	App struct {
+		Latest          string `json:"latest"`
+		UpdateAvailable bool   `json:"update_available"`
+		Configured      bool   `json:"configured"`
+	} `json:"app"`
 	Task *struct {
 		Kind string `json:"kind"`
 	} `json:"task"`
@@ -324,6 +331,9 @@ func (t *tray) notifyChanges(prev, cur *status) {
 	}
 	if prev.Base.Version != "" && cur.Base.Version != "" && prev.Base.Version != cur.Base.Version {
 		t.notify("Набор стратегий обновлён", "Версия "+cur.Base.Version+". Выбранная стратегия сохранена, если она осталась в наборе.")
+	}
+	if cur.App.UpdateAvailable && !cur.App.Configured && cur.App.Latest != prev.App.Latest {
+		t.notify("Вышла FI "+cur.App.Latest, "Откройте FI → Настройки, чтобы скачать новую версию.")
 	}
 	if prev.selecting() && !cur.selecting() {
 		if cur.Error == "" && cur.Strategy != "" {
@@ -544,6 +554,15 @@ func (t *tray) handleAPI(w http.ResponseWriter, r *http.Request) {
 	if r.PathValue("method") != "status" {
 		t.refreshSoon()
 	}
+}
+
+// handleRelease открывает в браузере страницу последней версии FI на GitHub.
+func (t *tray) handleRelease(w http.ResponseWriter, _ *http.Request) {
+	if err := t.app.Browser.OpenURL(appupdate.ReleasesPage()); err != nil {
+		writeJSON(w, http.StatusOK, map[string]string{"error": "Не удалось открыть браузер: " + err.Error()})
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (t *tray) handleHide(w http.ResponseWriter, _ *http.Request) {

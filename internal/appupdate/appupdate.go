@@ -150,6 +150,44 @@ func Sign(priv ed25519.PrivateKey, m Manifest) (manifest, sig []byte, err error)
 	return manifest, sig, nil
 }
 
+// ReleasesRepo — репозиторий на GitHub, где выходят версии FI. Сборка без ключа обновлений
+// узнаёт новую версию оттуда и предлагает скачать её, но не ставит сама.
+var ReleasesRepo = "HumsteRD/FreeInternet"
+
+// githubAPI — адрес API GitHub; в тестах подменяется.
+var githubAPI = "https://api.github.com"
+
+// ReleasesPage — страница последней версии для человека.
+func ReleasesPage() string { return "https://github.com/" + ReleasesRepo + "/releases/latest" }
+
+// LatestRelease узнаёт номер последней версии на GitHub — по тегу вида v0.3.0.
+func LatestRelease(ctx context.Context, client *http.Client) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, githubAPI+"/repos/"+ReleasesRepo+"/releases/latest", nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Accept", "application/vnd.github+json")
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("GitHub: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("GitHub: HTTP %d", resp.StatusCode)
+	}
+	var rel struct {
+		Tag string `json:"tag_name"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&rel); err != nil {
+		return "", fmt.Errorf("GitHub: %w", err)
+	}
+	version := strings.TrimPrefix(rel.Tag, "v")
+	if !versionRe.MatchString(version) {
+		return "", fmt.Errorf("GitHub: странная версия %q", rel.Tag)
+	}
+	return version, nil
+}
+
 // Newer сообщает, новее ли версия a, чем b: «0.10.0» новее «0.9.3».
 func Newer(a, b string) bool {
 	pa, pb := strings.Split(a, "."), strings.Split(b, ".")
