@@ -1,5 +1,9 @@
-# Выпуск версии: тег vX.Y.Z → тесты, сборка и установщик fi-setup.exe в разделе Releases.
-#   git tag v0.2.0 && git push origin v0.2.0
+# Выпуск версии: тег vX.Y.Z → тесты, сборка, подпись обновления и установщик fi-setup.exe в Releases.
+#   git tag v0.3.0 && git push origin v0.3.0
+#
+# Автообновление: установленные FI раз в сутки читают releases/latest/download/update.json,
+# проверяют подпись вшитым открытым ключом и ставят новую версию. Секретный ключ подписи —
+# в секрете репозитория FI_UPDATE_KEY (содержимое keys/update.key, создаётся fi-sign keygen).
 name: Выпуск
 
 on:
@@ -8,6 +12,11 @@ on:
 
 permissions:
   contents: write
+
+env:
+  # Открытый ключ к FI_UPDATE_KEY: его знают все сборки, начиная с 0.3.0. Если сменить ключ,
+  # прежние версии перестанут принимать обновления — их придётся переустановить вручную.
+  FI_UPDATE_PUBLIC_KEY: ayQczXibbAn92L1B2iOG/vxC7OidJZYKadLdx8pFnIg=
 
 jobs:
   release:
@@ -22,14 +31,31 @@ jobs:
       - name: Тесты
         run: go test ./...
 
-      - name: Сборка
+      - name: Сборка и подпись
         shell: pwsh
-        run: ./scripts/build.ps1 -Version "${{ github.ref_name }}".TrimStart("v")
+        env:
+          FI_UPDATE_KEY: ${{ secrets.FI_UPDATE_KEY }}
+        run: |
+          if (-not $env:FI_UPDATE_KEY) { throw "Не задан секрет FI_UPDATE_KEY: без подписи установленные FI не примут обновление" }
+          $version = "${{ github.ref_name }}".TrimStart("v")
+          $repo = "https://github.com/${{ github.repository }}/releases"
+          New-Item -ItemType Directory -Force keys | Out-Null
+          [IO.File]::WriteAllText("keys/update.key", $env:FI_UPDATE_KEY)
+          try {
+            ./scripts/build.ps1 -Version $version `
+              -UpdateURL "$repo/latest/download/update.json" -PublicKey $env:FI_UPDATE_PUBLIC_KEY `
+              -SignKey keys/update.key -InstallerURL "$repo/download/${{ github.ref_name }}/fi-setup.exe"
+          } finally {
+            Remove-Item keys/update.key -ErrorAction SilentlyContinue
+          }
 
       - name: Релиз
         uses: softprops/action-gh-release@v2
         with:
-          files: build/fi-setup.exe
+          files: |
+            build/fi-setup.exe
+            build/update.json
+            build/update.json.sig
           body: |
             ## Установка
             1. Скачайте **fi-setup.exe** ниже и запустите.
@@ -37,6 +63,7 @@ jobs:
                Установщик не подписан сертификатом — это платная услуга; исходники открыты здесь же.
             3. После установки значок FI появится в трее. Окно предложит скачать набор стратегий и подобрать лучшую.
 
-            Обновить FI — запустить установщик новой версии поверх старой.
+            Начиная с 0.3.0 FI обновляется сам (Настройки → «Обновлять FI автоматически»): обновление
+            подписано, и подменённое FI не примет. Со старых версий обновитесь вручную — установщиком поверх.
             Удалить — «Параметры → Приложения → FI». Ваш список сайтов и настройки при этом остаются, если не выбрать их удаление.
           generate_release_notes: true

@@ -56,13 +56,21 @@ git tag v0.2.0
 git push origin v0.2.0
 ```
 
-GitHub Actions (`.github/workflows/release.yml`) прогонит тесты, соберёт установщик
-и выложит `fi-setup.exe` в [Releases](https://github.com/HumsteRD/FreeInternet/releases).
-Ссылка `releases/latest/download/fi-setup.exe` в README всегда ведёт на последнюю версию.
+GitHub Actions (`.github/workflows/release.yml`) прогонит тесты, соберёт и подпишет установщик
+и выложит в [Releases](https://github.com/HumsteRD/FreeInternet/releases) `fi-setup.exe`,
+`update.json` и `update.json.sig`. Ссылка `releases/latest/download/fi-setup.exe` в README
+всегда ведёт на последнюю версию.
 
 ### Автообновление
 
-Включается сборкой с адресом манифеста и открытым ключом; без них FI просто не обновляется сам.
+Выпуски из GitHub Actions обновляются сами: манифест — `releases/latest/download/update.json`,
+открытый ключ — `FI_UPDATE_PUBLIC_KEY` в `release.yml`, секретный — в секрете репозитория
+`FI_UPDATE_KEY` (Settings → Secrets and variables → Actions). Без секрета выпуск не соберётся.
+Секретный ключ храните ещё и в надёжном месте: если его потерять, установленные FI перестанут
+принимать обновления, и их придётся переустановить вручную.
+
+Сборка без адреса манифеста и ключа (например, локальная) сама не обновляется, но раз в сутки
+смотрит последний выпуск на GitHub и предлагает скачать его. Подписать локальную сборку:
 
 ```powershell
 # один раз: ключи (секретный хранить отдельно, в репозиторий не класть)
