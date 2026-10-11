@@ -43,7 +43,9 @@ type wsConn struct {
 	viaCF     bool   // через общий домен Cloudflare
 	host      string // домен, к которому открыт WebSocket
 	cfBase    string // общий домен Cloudflare, если соединение через него
-	wmu       sync.Mutex
+	// closeReason — причина из кадра закрытия, если сервер её прислал.
+	closeReason string
+	wmu         sync.Mutex
 }
 
 // statusError — сервер ответил не переходом на WebSocket.
@@ -161,6 +163,9 @@ func (w *wsConn) recv() ([]byte, error) {
 		}
 		switch op {
 		case opClose:
+			if len(payload) > 2 { // код и причина: воркер так сообщает, почему оборвал соединение
+				w.closeReason = string(payload[2:])
+			}
 			w.writeFrame(opClose, payload[:min(2, len(payload))])
 			return nil, io.EOF
 		case opPing:

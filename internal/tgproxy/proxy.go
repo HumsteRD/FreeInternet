@@ -245,7 +245,7 @@ func (s *Server) handle(ctx context.Context, client net.Conn) {
 		return
 	}
 	if silent := bridge(client, up, crypto, ci.proto, func() { s.noteBadDC(dc, ci.media, up) }); silent && isViaWorker(up) {
-		s.pauseWorker()
+		s.pauseWorker(up.(*wsConn).closeReason)
 	}
 }
 
@@ -255,7 +255,7 @@ const workerPause = time.Minute
 // pauseWorker откладывает воркер: соединение с ним открылось, а данных от Telegram не было.
 // Без этого неисправный воркер (например, со старым кодом) оставил бы Telegram без связи —
 // до прямого пути и Cloudflare дело бы не доходило.
-func (s *Server) pauseWorker() {
+func (s *Server) pauseWorker(reason string) {
 	s.mu.Lock()
 	already := time.Now().Before(s.workerPausedUntil)
 	s.workerPausedUntil = time.Now().Add(workerPause)
@@ -268,7 +268,7 @@ func (s *Server) pauseWorker() {
 		p.flush() // в пуле — соединения через тот же воркер
 	}
 	if s.Log != nil {
-		s.Log.Warn("воркер закрывает соединения, ничего не передав, — минуту Telegram идёт в обход него", "worker", s.Worker)
+		s.Log.Warn("воркер закрывает соединения, ничего не передав, — минуту Telegram идёт в обход него", "worker", s.Worker, "reason", reason)
 	}
 }
 

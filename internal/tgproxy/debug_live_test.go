@@ -3,9 +3,12 @@
 package tgproxy
 
 import (
+	"bufio"
 	"context"
 	"crypto/tls"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"testing"
@@ -95,4 +98,44 @@ func TestLiveWorkerFallback(t *testing.T) {
 		err := askPQ(srv, 2)
 		t.Logf("попытка %d: %v (%s), воркер отложен: %v", i+1, err, time.Since(start).Round(time.Millisecond), srv.workerPaused())
 	}
+}
+
+// dialWSNoProto — как dialWS, но без Sec-WebSocket-Protocol: проверяем, не в нём ли дело.
+func dialWSNoProto(ctx context.Context, addr, host, path string) (*wsConn, error) {
+	var d net.Dialer
+	raw, err := d.DialContext(ctx, "tcp", addr)
+	if err != nil {
+		return nil, err
+	}
+	conn := tls.Client(raw, &tls.Config{ServerName: host, NextProtos: []string{"http/1.1"}})
+	if err := conn.HandshakeContext(ctx); err != nil {
+		return nil, err
+	}
+	key := "dGhlIHNhbXBsZSBub25jZQ=="
+	io.WriteString(conn, "GET "+path+" HTTP/1.1\r\nHost: "+host+"\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: "+key+"\r\nSec-WebSocket-Version: 13\r\n\r\n")
+	br := bufio.NewReaderSize(conn, 64<<10)
+	resp, err := http.ReadResponse(br, nil)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != 101 {
+		return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+	return &wsConn{conn: conn, br: br, host: host, raw: true}, nil
+}
+
+func TestLiveWorkerNoProto(t *testing.T) {
+	worker := os.Getenv("FI_WORKER")
+	if worker == "" {
+		t.Skip("FI_WORKER не задан")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	ws, err := dialWSNoProto(ctx, net.JoinHostPort(worker, "443"), worker, "/?host=tdesktop.com&port=443")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tc := tls.Client(&wsStream{ws: ws}, &tls.Config{ServerName: "tdesktop.com"})
+	err = tc.HandshakeContext(ctx)
+	t.Logf("TLS tdesktop.com без Sec-WebSocket-Protocol: %v", err)
 }
