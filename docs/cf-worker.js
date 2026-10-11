@@ -3,10 +3,11 @@
 // Нужен там, где адреса Telegram закрыты по IP, а Cloudflare открыт.
 //
 // Как поставить:
-//   1. dash.cloudflare.com → Workers & Pages → Create → Start with Hello World → Deploy.
-//   2. Edit code: вставить этот файл целиком, Deploy.
-//   3. Домен воркера (вида имя-1234.логин.workers.dev) вписать в FI:
-//      Настройки → Telegram → «Путь через Cloudflare».
+//   1. dash.cloudflare.com → Compute → Workers & Pages → Create application →
+//      Start with Hello World! → имя (например fi-tg) → Deploy.
+//   2. Edit code: стереть шаблон в worker.js, вставить этот файл целиком → Deploy.
+//   3. Адрес воркера (fi-tg.имя.workers.dev) вписать в FI без https://:
+//      Настройки → Telegram → «Свой Cloudflare Worker» → Сохранить.
 //
 // Воркер ничего не расшифровывает: внутри соединения идёт MTProto, ключ знают только
 // Telegram и ваш клиент.

@@ -64,10 +64,14 @@ Cloudflare». Домены держат сторонние люди, ими по
 
 **Свой воркер (надёжнее).** Бесплатный Cloudflare Worker, которым пользуетесь только вы.
 
-1. [dash.cloudflare.com](https://dash.cloudflare.com/) → Workers & Pages → Create → Deploy.
-2. Edit code: вставить [docs/cf-worker.js](docs/cf-worker.js) целиком → Deploy.
-3. Домен воркера (`имя-1234.логин.workers.dev`) вписать в FI: Настройки → Telegram →
-   «Свой Cloudflare Worker».
+1. [dash.cloudflare.com](https://dash.cloudflare.com/) → Compute → Workers & Pages →
+   **Create application** → **Start with Hello World!** → любое имя (например `fi-tg`) → **Deploy**.
+   Если Cloudflare попросит выбрать поддомен `workers.dev` для аккаунта — любое свободное имя.
+2. **Edit code** (справа вверху) → в `worker.js` стереть шаблон (Ctrl+A, Delete) → вставить
+   [docs/cf-worker.js](docs/cf-worker.js) целиком (на GitHub: Raw → Ctrl+A → Ctrl+C) → **Deploy**.
+3. Адрес воркера (`fi-tg.имя.workers.dev`, рядом с кнопкой Visit) вписать без `https://` в FI:
+   Настройки → Telegram → «Свой Cloudflare Worker» → «Сохранить». Открытый в браузере, воркер
+   отвечает «FI worker: работает».
 
 Воркер, созданный до FI 0.3.0, мини-приложения не открывает — замените его код новым
 `docs/cf-worker.js` (шаг 2).
