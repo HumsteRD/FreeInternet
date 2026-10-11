@@ -18,7 +18,11 @@ func TestLiveSignedManifest(t *testing.T) {
 	if pub == "" {
 		t.Skip("FI_UPDATE_PUBLIC_KEY не задан")
 	}
-	srv := httptest.NewServer(http.FileServer(http.Dir("../../build")))
+	dir := os.Getenv("FI_UPDATE_DIR") // папка с update.json и update.json.sig; по умолчанию build\
+	if dir == "" {
+		dir = "../../build"
+	}
+	srv := httptest.NewServer(http.FileServer(http.Dir(dir)))
 	defer srv.Close()
 	m, err := check(context.Background(), srv.Client(), srv.URL+"/update.json", pub)
 	if err != nil {
