@@ -22,7 +22,7 @@ func clean() Snapshot {
 		Hosts:      "# localhost\n127.0.0.1 localhost\n149.154.167.99 web.telegram.org\n",
 		DoH:        true,
 		Timestamps: true,
-		Adapters:   []Adapter{{"Ethernet", "Realtek PCIe GbE Family Controller", 5}},
+		Adapters:   []Adapter{{Name: "Ethernet", Description: "Realtek PCIe GbE Family Controller", Index: 5, Gateway: true, Metric: 25}},
 		InternetIf: 5,
 	}
 }
@@ -48,7 +48,7 @@ func TestEvaluateProblems(t *testing.T) {
 	s.Timestamps = false
 	s.DoH = false
 	s.Hosts = "0.0.0.0 youtube.com www.youtube.com # старое\n# 1.2.3.4 i.ytimg.com\n"
-	s.Adapters = append(s.Adapters, Adapter{"AmneziaVPN", "WireGuard Tunnel", 9})
+	s.Adapters = append(s.Adapters, Adapter{Name: "AmneziaVPN", Description: "WireGuard Tunnel", Index: 9})
 	s.InternetIf = 9
 
 	got := byID(Evaluate(s))
@@ -81,6 +81,24 @@ func TestEvaluateProblems(t *testing.T) {
 	s.InternetIf = 5
 	if f := byID(Evaluate(s))["vpn"]; f.Level != LevelInfo || !strings.Contains(f.Detail, "Radmin VPN") {
 		t.Errorf("VPN мимо: %+v", f)
+	}
+}
+
+func TestPhysicalAdapter(t *testing.T) {
+	list := []Adapter{
+		{Name: "happ-xray", Description: "Happ Tunnel", Index: 18, Gateway: true},
+		{Name: "Wi-Fi", Description: "Intel(R) Wi-Fi 6 AX201", Index: 12, Gateway: true, Metric: 35},
+		{Name: "Ethernet", Description: "Realtek PCIe GbE Family Controller", Index: 7, Gateway: true, Metric: 25},
+		{Name: "VirtualBox Host-Only", Description: "VirtualBox Host-Only Ethernet Adapter", Index: 3},
+	}
+	if a := vpnAdapter(list, 18); a == nil || a.Index != 18 {
+		t.Fatalf("Happ не распознан как VPN: %+v", a)
+	}
+	if a := physicalAdapter(list); a == nil || a.Index != 7 {
+		t.Fatalf("обычный адаптер: %+v, ждали Ethernet (7)", a)
+	}
+	if a := physicalAdapter(list[:1]); a != nil {
+		t.Fatalf("кроме VPN адаптеров нет, а найден %+v", a)
 	}
 }
 

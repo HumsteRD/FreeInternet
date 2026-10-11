@@ -169,6 +169,7 @@ type tray struct {
 	notifier  *notifications.NotificationService
 	poke      chan struct{}
 	notified  map[string]time.Time // только из watch
+	alerts    serviceAlerts        // только из watch
 	exe       string               // свой файл: если установщик его заменил, окно перезапускается
 	exeTime   time.Time
 
@@ -183,6 +184,7 @@ type status struct {
 	AutoFix   bool   `json:"auto_fix"`
 	Strategy  string `json:"strategy"`
 	Error     string `json:"error"`
+	VPN       string `json:"vpn"`
 	CheckedAt string `json:"checked_at"`
 	Base      struct {
 		Version string `json:"version"`
@@ -190,11 +192,13 @@ type status struct {
 	Task *struct {
 		Kind string `json:"kind"`
 	} `json:"task"`
-	Services []struct {
-		ID    string `json:"id"`
-		Title string `json:"title"`
-		State string `json:"state"`
-	} `json:"services"`
+	Services []serviceInfo `json:"services"`
+}
+
+type serviceInfo struct {
+	ID    string `json:"id"`
+	Title string `json:"title"`
+	State string `json:"state"`
 }
 
 func (st *status) selecting() bool { return st.Task != nil && st.Task.Kind == "select" }
@@ -327,26 +331,63 @@ func (t *tray) notifyChanges(prev, cur *status) {
 		return
 	}
 	// Сравнивать сервисы имеет смысл только после новой проверки при включённом обходе.
-	if cur.CheckedAt == prev.CheckedAt || !cur.Enabled || cur.selecting() {
+	// Через VPN проверки видят сеть VPN, а не провайдера, — о поломках обхода они не говорят.
+	if cur.CheckedAt == prev.CheckedAt || !cur.Enabled || cur.selecting() || cur.VPN != "" {
 		return
 	}
-	was := make(map[string]string, len(prev.Services))
-	for _, s := range prev.Services {
-		was[s.ID] = s.State
-	}
-	for _, s := range cur.Services {
-		broken := s.State == "fail" || s.State == "partial"
-		switch before := was[s.ID]; {
-		case before == "ok" && broken:
+	for _, a := range t.alerts.update(cur.Services) {
+		if a.broken {
 			body := "Откройте FI, чтобы подобрать стратегию заново."
 			if cur.AutoFix {
-				body = "FI подбирает стратегию заново."
+				body = "FI попробует подобрать стратегию заново."
 			}
-			t.notify("Не работает: "+s.Title, body)
-		case (before == "fail" || before == "partial") && s.State == "ok":
-			t.notify("Снова работает: "+s.Title, "")
+			t.notify("Не работает: "+a.title, body)
+		} else {
+			t.notify("Снова работает: "+a.title, "")
 		}
 	}
+}
+
+// serviceAlerts решает, о чём уведомлять. Поломка считается настоящей, только если её
+// подтвердила и следующая проверка (служба перепроверяет через минуту): одиночные сбои
+// бывают от сети и уведомлений не стоят. «Снова работает» — только после уведомления о поломке.
+type serviceAlerts struct {
+	last    map[string]string // состояние сервиса при прошлой проверке
+	pending map[string]bool   // сломался на прошлой проверке, ждём подтверждения
+	down    map[string]bool   // о поломке уже сообщили
+}
+
+type alert struct {
+	title  string
+	broken bool
+}
+
+func (a *serviceAlerts) update(services []serviceInfo) []alert {
+	if a.last == nil {
+		a.last, a.pending, a.down = map[string]string{}, map[string]bool{}, map[string]bool{}
+	}
+	var out []alert
+	for _, s := range services {
+		broken := s.State == "fail" || s.State == "partial"
+		before, known := a.last[s.ID]
+		a.last[s.ID] = s.State
+		switch {
+		case !known:
+		case broken && a.pending[s.ID]:
+			delete(a.pending, s.ID)
+			a.down[s.ID] = true
+			out = append(out, alert{title: s.Title, broken: true})
+		case broken && before == "ok":
+			a.pending[s.ID] = true
+		case s.State == "ok":
+			delete(a.pending, s.ID)
+			if a.down[s.ID] {
+				delete(a.down, s.ID)
+				out = append(out, alert{title: s.Title})
+			}
+		}
+	}
+	return out
 }
 
 func (t *tray) notify(title, body string) {

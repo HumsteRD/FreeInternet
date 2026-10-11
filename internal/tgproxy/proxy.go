@@ -18,6 +18,12 @@ const (
 	dialTimeout      = 5 * time.Second
 	failCooldown     = time.Minute // неудачный адрес не пробуем повторно минуту
 	dnsCacheTTL      = 10 * time.Minute
+	// dnsFailTTL — сколько помнить, что адрес не нашёлся: DNS часто сбоит на минуту при смене
+	// сети или включении VPN, и десятиминутная пауза оставила бы Telegram без запасного пути.
+	dnsFailTTL = 20 * time.Second
+	// raceDelay — через сколько запускать второй путь (Cloudflare или прямой), если первый
+	// ещё не ответил: иначе Telegram ждёт все таймауты первого и считает прокси сломанным.
+	raceDelay = 1500 * time.Millisecond
 )
 
 // workerPort — порт Cloudflare; в тестах подменяется на адрес поддельного воркера.
@@ -74,6 +80,9 @@ type Server struct {
 	PoolSize int    // готовых соединений на дата-центр: 0 — по умолчанию, меньше нуля — без пула
 	Worker   string // домен Cloudflare Worker: путь в Telegram, когда его адреса закрыты по IP
 	Log      *slog.Logger
+	// LookupFallback ищет адрес, когда системный DNS не ответил (например, DNS поверх HTTPS):
+	// провайдеры часто не резолвят общие домены Cloudflare. nil — только системный DNS.
+	LookupFallback func(ctx context.Context, host string) (string, error)
 
 	// wsUpstream — подмена подключения по WebSocket в тестах.
 	wsUpstream func(ctx context.Context, k poolKey) (upstream, error)
@@ -94,6 +103,14 @@ type Server struct {
 type dnsEntry struct {
 	ips []string
 	at  time.Time
+}
+
+// ttl — сколько верить записи: неудачный поиск быстро повторяется.
+func (e dnsEntry) ttl() time.Duration {
+	if len(e.ips) == 0 {
+		return dnsFailTTL
+	}
+	return dnsCacheTTL
 }
 
 // Link — ссылка tg://proxy для настройки Telegram одним нажатием.
@@ -377,27 +394,79 @@ func (s *Server) dialUpstream(ctx context.Context, k poolKey) (upstream, error) 
 
 	// Прямой путь и общие домены Cloudflare: первым — тот, что сработал недавно.
 	cfFirst := s.preferCF()
-	routes := []func(context.Context, poolKey) (upstream, error){s.dialWebSocket, s.dialCF}
+	routes := [2]func(context.Context, poolKey) (upstream, error){s.dialWebSocket, s.dialCF}
 	if cfFirst {
 		routes[0], routes[1] = routes[1], routes[0]
 	}
-	for i, route := range routes {
-		up, err := route(ctx, k)
-		if err == nil {
-			viaCF := isViaCF(up)
-			switch {
-			case viaCF && i > 0:
-				s.setPreferCF(true) // прямой не прошёл, Cloudflare сработал
-			case !viaCF && cfFirst:
-				s.setPreferCF(false) // Cloudflare подвёл, а прямой снова работает
+	up, second, err := raceRoutes(ctx, k, routes)
+	if err != nil {
+		return nil, errors.Join(append(errs, err)...)
+	}
+	viaCF := isViaCF(up)
+	switch {
+	case viaCF && second:
+		s.setPreferCF(true) // прямой не прошёл или опоздал, Cloudflare сработал
+	case !viaCF && cfFirst:
+		s.setPreferCF(false) // Cloudflare подвёл, а прямой снова работает
+	}
+	return up, nil
+}
+
+// raceRoutes запускает первый путь, а второй — если первый не справился или не ответил за
+// raceDelay. Берётся соединение, открывшееся раньше; опоздавшее закрывается. second — победил
+// второй путь.
+func raceRoutes(ctx context.Context, k poolKey, routes [2]func(context.Context, poolKey) (upstream, error)) (up upstream, second bool, err error) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	type result struct {
+		up  upstream
+		err error
+		i   int
+	}
+	results := make(chan result, len(routes))
+	started := 0
+	start := func() {
+		i := started
+		started++
+		go func() {
+			up, err := routes[i](ctx, k)
+			results <- result{up, err, i}
+		}()
+	}
+	start()
+	timer := time.NewTimer(raceDelay)
+	defer timer.Stop()
+
+	var errs []error
+	for done := 0; done < started; {
+		select {
+		case <-timer.C:
+			if started < len(routes) {
+				start()
 			}
-			return up, nil
-		}
-		if !errors.Is(err, errNoCF) {
-			errs = append(errs, err)
+		case r := <-results:
+			done++
+			if r.err == nil {
+				if pending := started - done; pending > 0 {
+					go func() { // опоздавший путь: соединение уже не нужно
+						for range pending {
+							if late := <-results; late.err == nil {
+								late.up.close()
+							}
+						}
+					}()
+				}
+				return r.up, r.i > 0, nil
+			}
+			if !errors.Is(r.err, errNoCF) {
+				errs = append(errs, r.err)
+			}
+			if started < len(routes) {
+				start() // первый уже не прошёл — второй ждать незачем
+			}
 		}
 	}
-	return nil, errors.Join(errs...)
+	return nil, false, errors.Join(errs...)
 }
 
 // workerPath — запрос к нашему воркеру: какой дата-центр открыть.
@@ -512,7 +581,7 @@ func (s *Server) resolve(ctx context.Context, host string, dc int) []string {
 	entry, ok := s.dnsCache[host]
 	s.mu.Unlock()
 
-	if !ok || time.Since(entry.at) > dnsCacheTTL {
+	if !ok || time.Since(entry.at) > entry.ttl() {
 		lookupCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 		addrs, err := net.DefaultResolver.LookupIP(lookupCtx, "ip4", host)
 		cancel()
@@ -523,6 +592,13 @@ func (s *Server) resolve(ctx context.Context, host string, dc int) []string {
 					entry.ips = append(entry.ips, a.String())
 				}
 			}
+		}
+		if len(entry.ips) == 0 && s.LookupFallback != nil {
+			lookupCtx, cancel := context.WithTimeout(ctx, 4*time.Second)
+			if ip, err := s.LookupFallback(lookupCtx, host); err == nil {
+				entry.ips = []string{ip}
+			}
+			cancel()
 		}
 		s.mu.Lock()
 		if s.dnsCache == nil {

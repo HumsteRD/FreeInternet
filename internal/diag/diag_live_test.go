@@ -13,6 +13,11 @@ func TestLiveDiagnose(t *testing.T) {
 		t.Logf("собрано не всё: %v", err)
 	}
 	t.Logf("служб: %d, процессов: %d, адаптеров: %d, интернет через адаптер %d", len(snap.Services), len(snap.Processes), len(snap.Adapters), snap.InternetIf)
+	for _, a := range snap.Adapters {
+		t.Logf("адаптер %d %q (%s): шлюз %v, метрика %d", a.Index, a.Name, a.Description, a.Gateway, a.Metric)
+	}
+	vpn, physical := InternetRoute()
+	t.Logf("VPN: %q, обход при VPN ограничится адаптером %d", vpn, physical)
 	findings := append(Evaluate(snap), EvaluateUser(CollectUser())...)
 	for _, f := range findings {
 		t.Logf("[%s] %s — %s %s", f.Level, f.Title, f.Detail, f.Fix)

@@ -26,6 +26,8 @@ func DefaultTargets() []Target {
 		// Отсюда приложение Discord скачивает обновления; если сервер недоступен,
 		// оно висит на «Checking for updates…».
 		{Name: "Discord: загрузка обновлений", Group: "discord", Kind: KindTLS, Host: "stable.dl2.discordapp.net", Weight: 2},
+		// Активности (встроенные игры) открываются с <id приложения>.discordsays.com; это Watch Together.
+		{Name: "Discord: активности", Group: "discord", Kind: KindTLS, Host: "880218394199220334.discordsays.com", Weight: 1},
 
 		{Name: "Cloudflare: сайт", Group: "cloudflare", Kind: KindPage, Host: "www.cloudflare.com", Weight: 2},
 		{Name: "Cloudflare: cdnjs", Group: "cloudflare", Kind: KindPage, Host: "cdnjs.cloudflare.com", Path: "/ajax/libs/jquery/3.7.1/jquery.min.js", Weight: 2},

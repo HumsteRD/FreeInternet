@@ -53,6 +53,8 @@ type Adapter struct {
 	Name        string
 	Description string
 	Index       uint32
+	Gateway     bool   // есть шлюз по умолчанию: через адаптер можно выйти в интернет
+	Metric      uint32 // метрика IPv4: чем меньше, тем охотнее Windows шлёт через него
 }
 
 // Snapshot — что диагностика узнала о системе. Сбор отделён от оценки, чтобы оценку проверять тестами.
@@ -159,7 +161,11 @@ func checkTimestamps(s Snapshot) Finding {
 }
 
 // vpnWords — по этим словам в имени или описании адаптер похож на VPN или туннель.
-var vpnWords = []string{"vpn", "wireguard", "wintun", "tap-windows", "openvpn", "amnezia", "warp", "tunnel", "tun2socks", "sing-tun", "hamachi", "zerotier", "outline"}
+var vpnWords = []string{
+	"vpn", "wireguard", "wintun", "tap-windows", "openvpn", "amnezia", "warp", "tunnel", "tun2socks", "sing-tun",
+	"hamachi", "zerotier", "outline", "xray", "v2ray", "happ", "hiddify", "clash", "mihomo", "nekoray", "nekobox",
+	"sing-box", "singbox", "throne", "nordlynx", "mullvad", "tailscale",
+}
 
 func looksLikeVPN(text string) bool {
 	text = strings.ToLower(text)
@@ -174,6 +180,21 @@ func vpnAdapter(list []Adapter, internetIf uint32) *Adapter {
 		}
 	}
 	return nil
+}
+
+// physicalAdapter — адаптер, через который в интернет выходит сам VPN (Ethernet, Wi-Fi): со шлюзом,
+// не похожий на VPN, с наименьшей метрикой. nil — такого нет.
+func physicalAdapter(list []Adapter) *Adapter {
+	var best *Adapter
+	for i, a := range list {
+		if !a.Gateway || looksLikeVPN(a.Name) || looksLikeVPN(a.Description) {
+			continue
+		}
+		if best == nil || a.Metric < best.Metric {
+			best = &list[i]
+		}
+	}
+	return best
 }
 
 func checkVPN(s Snapshot) Finding {

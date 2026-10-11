@@ -188,6 +188,17 @@ var stateText = map[string]string{
 	StateEmpty:   "проверять нечего",
 }
 
+// broke — какой-то сервис работал при прошлой проверке и сейчас не работает, по любой причине.
+func broke(prev, cur []Service) bool {
+	was := make(map[string]string, len(prev))
+	for _, s := range prev {
+		was[s.ID] = s.State
+	}
+	return slices.ContainsFunc(cur, func(s Service) bool {
+		return was[s.ID] == StateOK && (s.State == StateFail || s.State == StatePartial)
+	})
+}
+
 // regressed — какой-то сервис работал при прошлой проверке и сломался сейчас так, что может
 // помочь другая стратегия. Недоступный по адресу сервер или подмена DNS подбором не лечатся:
 // переподбор тогда только зря прервал бы интернет.

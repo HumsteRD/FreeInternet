@@ -254,6 +254,13 @@ func TestRegressedOnlyWhenStrategyCanHelp(t *testing.T) {
 	if !regressed(prev, dpi) {
 		t.Error("сброс соединения — помеха DPI, другая стратегия может помочь")
 	}
+	// Перепроверка нужна для любой поломки: окно уведомляет только о подтверждённых.
+	if !broke(prev, ipBlock) || !broke(prev, dpi) {
+		t.Error("broke должен замечать любую поломку работавшего сервиса")
+	}
+	if broke(ipBlock, ipBlock) {
+		t.Error("сервис не работал и раньше — это не новая поломка")
+	}
 }
 
 func TestEngineErrorText(t *testing.T) {

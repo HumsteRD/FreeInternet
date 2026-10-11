@@ -162,7 +162,7 @@ func adapters() ([]Adapter, uint32, error) {
 	for {
 		buf = make([]byte, size)
 		err := windows.GetAdaptersAddresses(windows.AF_UNSPEC,
-			windows.GAA_FLAG_SKIP_ANYCAST|windows.GAA_FLAG_SKIP_MULTICAST|windows.GAA_FLAG_SKIP_DNS_SERVER,
+			windows.GAA_FLAG_SKIP_ANYCAST|windows.GAA_FLAG_SKIP_MULTICAST|windows.GAA_FLAG_SKIP_DNS_SERVER|windows.GAA_FLAG_INCLUDE_GATEWAYS,
 			0, (*windows.IpAdapterAddresses)(unsafe.Pointer(&buf[0])), &size)
 		if errors.Is(err, windows.ERROR_BUFFER_OVERFLOW) {
 			continue
@@ -181,6 +181,8 @@ func adapters() ([]Adapter, uint32, error) {
 			Name:        windows.UTF16PtrToString(a.FriendlyName),
 			Description: windows.UTF16PtrToString(a.Description),
 			Index:       a.IfIndex,
+			Gateway:     a.FirstGatewayAddress != nil,
+			Metric:      a.Ipv4Metric,
 		})
 	}
 	runtime.KeepAlive(buf)
@@ -304,4 +306,21 @@ func InternetVPN() string {
 		return a.Name
 	}
 	return ""
+}
+
+// InternetRoute — VPN-адаптер, через который сейчас идёт интернет, и индекс обычного адаптера,
+// через который выходит в сеть сам VPN (0 — не найден). Без VPN — "" и 0.
+func InternetRoute() (vpn string, physical uint32) {
+	list, index, err := adapters()
+	if err != nil {
+		return "", 0
+	}
+	a := vpnAdapter(list, index)
+	if a == nil {
+		return "", 0
+	}
+	if p := physicalAdapter(list); p != nil {
+		physical = p.Index
+	}
+	return a.Name, physical
 }

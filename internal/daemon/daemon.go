@@ -43,6 +43,9 @@ const (
 	confirmDelay      = time.Minute     // через сколько подтверждать поломку перед автоподбором
 	recheckOffline    = 2 * time.Minute // когда нет связи, следующая проверка скорее обычной
 	quietAfterUseless = 6 * time.Hour   // пауза автоподбора, если быстрый подбор не нашёл ничего лучше
+	// vpnPoll — как часто смотреть, не включился ли VPN: движок надо сразу убрать с адаптера VPN,
+	// иначе поддельные пакеты стратегии попадают в туннель и ломают соединения внутри него.
+	vpnPoll = 3 * time.Second
 )
 
 // Task — долгая операция, которую показывает окно.
@@ -93,6 +96,7 @@ type Daemon struct {
 	strategies []strategy.Strategy
 	baseErr    error
 	proc       *engine.Process
+	engineIf   uint32 // движок перехватывает только этот адаптер, потому что включён VPN; 0 — все
 	engineErr  string
 	conflict   []string // другие обходы, найденные при последнем запуске движка
 	restarts   []time.Time
@@ -174,10 +178,14 @@ func (d *Daemon) Run(ctx context.Context) error {
 		}
 	}
 	d.startTelegram()
-	d.tasks.Add(1)
+	d.tasks.Add(2)
 	go func() {
 		defer d.tasks.Done()
 		d.refreshCF(ctx, false)
+	}()
+	go func() {
+		defer d.tasks.Done()
+		d.watchVPN(ctx)
 	}()
 
 	// Первая проверка вскоре после старта, чтобы окно сразу показало состояние.
@@ -346,6 +354,7 @@ func (d *Daemon) startEngine() error {
 	d.engineMu.Lock()
 	defer d.engineMu.Unlock()
 
+	iface := engineIface()
 	d.mu.Lock()
 	if d.proc != nil {
 		d.mu.Unlock()
@@ -353,6 +362,10 @@ func (d *Daemon) startEngine() error {
 	}
 	exe, args, err := d.engineArgsLocked()
 	d.mu.Unlock()
+	if iface != 0 {
+		// Фильтр WinDivert — общий для всех профилей, поэтому стоит первым, рядом с --wf-tcp.
+		args = append([]string{fmt.Sprintf("--wf-iface=%d", iface)}, args...)
+	}
 
 	var others []string
 	if err == nil {
@@ -377,10 +390,55 @@ func (d *Daemon) startEngine() error {
 		d.engineErr = engineErrorText(err)
 		return err
 	}
-	d.proc, d.engineErr = proc, ""
-	d.log.Info("обход запущен", "strategy", d.cfg.Strategy)
+	d.proc, d.engineIf, d.engineErr = proc, iface, ""
+	if iface != 0 {
+		d.log.Info("обход запущен мимо VPN", "strategy", d.cfg.Strategy, "if", iface)
+	} else {
+		d.log.Info("обход запущен", "strategy", d.cfg.Strategy)
+	}
 	go d.watch(proc)
 	return nil
+}
+
+// engineIface — адаптер, которым надо ограничить движок: при включённом VPN — тот, через который
+// VPN выходит в сеть. Так обход работает для трафика мимо VPN и не трогает туннель. 0 — без
+// ограничений: VPN нет или обычный адаптер не найден.
+var engineIface = func() uint32 {
+	vpn, physical := diag.InternetRoute()
+	if vpn == "" {
+		return 0
+	}
+	return physical
+}
+
+// watchVPN перезапускает движок, когда VPN включается или выключается: при VPN движок
+// ограничен обычным адаптером, без VPN снова перехватывает все.
+func (d *Daemon) watchVPN(ctx context.Context) {
+	tick := time.NewTicker(vpnPoll)
+	defer tick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+		}
+		want := engineIface()
+		d.mu.Lock()
+		restart := d.proc != nil && d.engineIf != want
+		d.mu.Unlock()
+		if !restart {
+			continue
+		}
+		if want != 0 {
+			d.log.Info("включился VPN — обход перезапускается мимо его адаптера", "if", want)
+		} else {
+			d.log.Info("VPN выключен — обход перезапускается на всех адаптерах")
+		}
+		d.stopEngine()
+		if err := d.startEngine(); err != nil {
+			d.log.Warn("обход не перезапущен", "err", err)
+		}
+	}
 }
 
 // startWinws запускает winws. Если не открылся драйвер WinDivert — обычно он завис после
@@ -582,23 +640,30 @@ func (d *Daemon) check(ctx context.Context) ([]Service, error) {
 	}
 	services := summarize(results)
 
+	d.noteVPN(vpn)
 	d.mu.Lock()
 	prev := d.services
 	d.services, d.checkedAt = services, time.Now()
-	vpnChanged := vpn != d.vpn
-	d.vpn = vpn
 	d.mu.Unlock()
-	if vpnChanged {
-		if vpn != "" {
-			d.log.Info("интернет идёт через VPN — проверки показывают его сеть", "adapter", vpn)
-		} else {
-			d.log.Info("интернет снова идёт напрямую, без VPN")
-		}
-	}
 	for _, line := range changes(prev, services) {
 		d.log.Info("сервис", "state", line)
 	}
 	return services, nil
+}
+
+// noteVPN запоминает, идёт ли интернет через VPN, и пишет в журнал, когда это меняется.
+func (d *Daemon) noteVPN(vpn string) {
+	d.mu.Lock()
+	changed := vpn != d.vpn
+	d.vpn = vpn
+	d.mu.Unlock()
+	switch {
+	case !changed:
+	case vpn != "":
+		d.log.Info("интернет идёт через VPN — проверки и автоподбор на паузе", "adapter", vpn)
+	default:
+		d.log.Info("интернет снова идёт напрямую, без VPN")
+	}
 }
 
 // telegramResult проверяет прокси для Telegram его собственными путями — так же, как
@@ -696,6 +761,13 @@ func (d *Daemon) periodicCheck(ctx context.Context) (soon bool) {
 		}
 	}
 
+	// Через VPN проверки видят его сеть, а не провайдера: сервисы, которые VPN не пропускает,
+	// выглядели бы сломанными, и FI слал бы ложные уведомления. Пока VPN включён, не проверяем.
+	if vpn := diag.InternetVPN(); vpn != "" {
+		d.noteVPN(vpn)
+		return false
+	}
+
 	d.mu.Lock()
 	prev := d.services
 	autoFix := d.cfg.AutoFix && d.proc != nil
@@ -717,10 +789,11 @@ func (d *Daemon) periodicCheck(ctx context.Context) (soon bool) {
 			d.fixBrokenInternet(ctx)
 		}
 		return true
-	case !autoFix || paused || !regressed(prev, services):
+	case !broke(prev, services):
 		return false
 	}
-	// Подбор на минуту прерывает интернет, поэтому сначала убеждаемся, что поломка не случайная.
+	// Сначала убеждаемся, что поломка не случайная: окно уведомляет только о подтверждённой,
+	// а подбор на минуту прерывает интернет.
 	d.log.Info("похоже, сервис перестал работать — перепроверю через минуту")
 	if !d.sleep(ctx, confirmDelay) {
 		return false
@@ -729,8 +802,10 @@ func (d *Daemon) periodicCheck(ctx context.Context) (soon bool) {
 	switch {
 	case err != nil:
 		return false
-	case !regressed(prev, services):
-		d.log.Info("сбой был временным — подбор не нужен")
+	case !broke(prev, services):
+		d.log.Info("сбой был временным")
+		return false
+	case !autoFix || paused || !regressed(prev, services):
 		return false
 	}
 	d.log.Info("сервис перестал работать — подбираю стратегию заново")

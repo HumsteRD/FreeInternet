@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"fi/internal/lists"
+	"fi/internal/probe"
 	"fi/internal/tgproxy"
 )
 
@@ -225,10 +226,11 @@ func (d *Daemon) startTelegram() {
 	}
 	secret, _ := hex.DecodeString(d.cfg.Telegram.Secret)
 	srv := &tgproxy.Server{
-		Addr:   telegramAddr(d.cfg.Telegram.Port),
-		Secret: secret,
-		Worker: d.cfg.Telegram.Worker,
-		Log:    d.log,
+		Addr:           telegramAddr(d.cfg.Telegram.Port),
+		Secret:         secret,
+		Worker:         d.cfg.Telegram.Worker,
+		Log:            d.log,
+		LookupFallback: probe.LookupDoH,
 	}
 	if d.cfg.Telegram.SharedCF {
 		srv.SetCFDomains(d.tgCF)

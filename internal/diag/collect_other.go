@@ -19,3 +19,5 @@ func UnloadWinDivert() error { return errUnsupported }
 func StopBypass(uint32) ([]string, error) { return nil, errUnsupported }
 
 func InternetVPN() string { return "" }
+
+func InternetRoute() (string, uint32) { return "", 0 }

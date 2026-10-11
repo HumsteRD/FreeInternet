@@ -71,6 +71,9 @@ type dohAnswer struct {
 	} `json:"Answer"`
 }
 
+// LookupDoH — IPv4-адрес хоста через DNS поверх HTTPS, мимо системного DNS.
+func LookupDoH(ctx context.Context, host string) (string, error) { return lookupDoH(ctx, host) }
+
 func lookupDoH(ctx context.Context, host string) (string, error) {
 	var errs []error
 	for _, endpoint := range dohEndpoints {

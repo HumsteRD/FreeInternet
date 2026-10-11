@@ -200,21 +200,26 @@ func (d *Daemon) addRelated(ctx context.Context, host string) []string {
 	ctx, cancel := context.WithTimeout(ctx, 40*time.Second)
 	defer cancel()
 
-	var own, targets []probe.Target
+	var own []string
+	var targets []probe.Target
 	for _, c := range relatedHosts(ctx, d.http, host) {
-		t := probe.Target{Name: c, Group: userGroup, Kind: probe.KindTLS, Host: c, Weight: 1}
 		if sameBrand(host, c) {
-			own = append(own, t)
-		} else {
-			targets = append(targets, t)
+			if domain, err := publicsuffix.EffectiveTLDPlusOne(c); err == nil {
+				own = append(own, domain)
+			}
+			continue
 		}
+		targets = append(targets, probe.Target{Name: c, Group: userGroup, Kind: probe.KindTLS, Host: c, Weight: 1})
 	}
-	add := make([]string, 0, len(own))
-	for _, t := range own {
-		add = append(add, t.Host)
-	}
+	add := own
+	// Чужие домены проверяем по адресу со страницы и добавляем только его: голый домен
+	// (steamstatic.com) часто вообще не резолвится, а обход всего *.steamstatic.com ломает
+	// аватарки Steam, которым провайдер не мешал.
 	for _, r := range d.prober.Run(ctx, targets) {
-		if r.Status != probe.OK && r.Status != probe.Slow {
+		switch r.Status {
+		case probe.OK, probe.Slow, probe.DNSFail, probe.Failed:
+			// открывается сам или обход тут не поможет
+		default:
 			add = append(add, r.Target.Host)
 		}
 	}
@@ -241,7 +246,8 @@ func (d *Daemon) addRelated(ctx context.Context, host string) []string {
 	return added
 }
 
-// relatedHosts берёт страницу сайта и вытаскивает домены, на которые она ссылается.
+// relatedHosts берёт страницу сайта и вытаскивает адреса, на которые она ссылается, —
+// по одному на каждый чужой домен.
 func relatedHosts(ctx context.Context, client *http.Client, host string) []string {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://"+host+"/", nil)
 	if err != nil {
@@ -260,17 +266,18 @@ func relatedHosts(ctx context.Context, client *http.Client, host string) []strin
 	}
 
 	own, _ := publicsuffix.EffectiveTLDPlusOne(host)
-	var found []string
+	var found, domains []string
 	for _, m := range relatedPattern.FindAllSubmatch(page, -1) {
 		name := strings.ToLower(strings.Trim(string(m[1]), "."))
 		domain, err := publicsuffix.EffectiveTLDPlusOne(name)
-		if err != nil || domain == own || domain == host || slices.Contains(found, domain) {
+		if err != nil || domain == own || domain == host || slices.Contains(domains, domain) {
 			continue
 		}
-		if !hostPattern.MatchString(domain) {
+		if !hostPattern.MatchString(name) {
 			continue
 		}
-		if found = append(found, domain); len(found) == maxRelated {
+		domains = append(domains, domain)
+		if found = append(found, name); len(found) == maxRelated {
 			break
 		}
 	}

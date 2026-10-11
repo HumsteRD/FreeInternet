@@ -33,6 +33,30 @@ func TestSitesRoundTrip(t *testing.T) {
 	}
 }
 
+func TestAlertsOnlyConfirmedFailures(t *testing.T) {
+	var a serviceAlerts
+	check := func(state string) []alert {
+		return a.update([]serviceInfo{{ID: "calls", Title: "Звонки и голос", State: state}})
+	}
+	steps := []struct {
+		state string
+		want  []alert
+	}{
+		{"ok", nil},      // первая проверка: только запоминаем
+		{"partial", nil}, // одиночный сбой — ждём подтверждения
+		{"ok", nil},      // сбой был случайным: ни «не работает», ни «снова работает»
+		{"fail", nil},
+		{"fail", []alert{{title: "Звонки и голос", broken: true}}}, // подтвердилось
+		{"fail", nil}, // уже сообщили
+		{"ok", []alert{{title: "Звонки и голос"}}},
+	}
+	for i, s := range steps {
+		if got := check(s.state); !reflect.DeepEqual(got, s.want) {
+			t.Fatalf("шаг %d (%s): %v, ждали %v", i, s.state, got, s.want)
+		}
+	}
+}
+
 func TestRedactHidesProxySecret(t *testing.T) {
 	out := string(redact([]byte(`{"telegram":{"secret":"abc123","link":"tg://proxy?secret=abc123","port":1453}}`)))
 	if strings.Contains(out, "abc123") {
