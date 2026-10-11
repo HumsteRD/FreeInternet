@@ -95,6 +95,8 @@ type Server struct {
 	logged   map[string]*logEntry  // когда какая ошибка попала в журнал
 	active   map[upstream]struct{} // соединения с Telegram, через которые сейчас идут данные
 
+	workerPausedUntil time.Time // воркер молча закрывал соединения — до этого времени в обход него
+
 	cfMu          sync.Mutex
 	cfList        []string       // общие домены Cloudflare
 	cfActive      map[int]string // домен, сработавший последним для дата-центра
@@ -242,7 +244,43 @@ func (s *Server) handle(ctx context.Context, client net.Conn) {
 	if err := up.send(relayInit); err != nil {
 		return
 	}
-	bridge(client, up, crypto, ci.proto, func() { s.noteBadDC(dc, ci.media, up) })
+	if silent := bridge(client, up, crypto, ci.proto, func() { s.noteBadDC(dc, ci.media, up) }); silent && isViaWorker(up) {
+		s.pauseWorker()
+	}
+}
+
+// workerPause — на сколько отложить воркер, который закрывает соединения, ничего не передав.
+const workerPause = time.Minute
+
+// pauseWorker откладывает воркер: соединение с ним открылось, а данных от Telegram не было.
+// Без этого неисправный воркер (например, со старым кодом) оставил бы Telegram без связи —
+// до прямого пути и Cloudflare дело бы не доходило.
+func (s *Server) pauseWorker() {
+	s.mu.Lock()
+	already := time.Now().Before(s.workerPausedUntil)
+	s.workerPausedUntil = time.Now().Add(workerPause)
+	p := s.pool
+	s.mu.Unlock()
+	if already {
+		return
+	}
+	if p != nil {
+		p.flush() // в пуле — соединения через тот же воркер
+	}
+	if s.Log != nil {
+		s.Log.Warn("воркер закрывает соединения, ничего не передав, — минуту Telegram идёт в обход него", "worker", s.Worker)
+	}
+}
+
+func (s *Server) workerPaused() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return time.Now().Before(s.workerPausedUntil)
+}
+
+func isViaWorker(up upstream) bool {
+	w, ok := up.(*wsConn)
+	return ok && w.viaWorker
 }
 
 func (s *Server) track(up upstream, on bool) {
@@ -269,7 +307,7 @@ func (s *Server) NetworkChanged() {
 	for up := range s.active {
 		active = append(active, up)
 	}
-	s.dnsCache, s.failed = nil, nil
+	s.dnsCache, s.failed, s.workerPausedUntil = nil, nil, time.Time{}
 	s.mu.Unlock()
 	s.setPreferCF(false)
 	if p != nil {
@@ -282,10 +320,11 @@ func (s *Server) NetworkChanged() {
 
 // bridge перешифровывает трафик в обе стороны, пока одна из сторон не закроется.
 // onBadDC вызывается, когда Telegram прислал код -444: соединение тогда закрывается.
-func bridge(client net.Conn, up upstream, c *cryptoCtx, proto uint32, onBadDC func()) {
-	done := make(chan struct{}, 2)
+// silent — соединение закрыла сторона Telegram, не прислав ни байта.
+func bridge(client net.Conn, up upstream, c *cryptoCtx, proto uint32, onBadDC func()) (silent bool) {
+	clientDone, upDone := make(chan struct{}), make(chan bool, 1)
 	go func() { // клиент → Telegram
-		defer func() { done <- struct{}{} }()
+		defer close(clientDone)
 		sp := &splitter{proto: proto}
 		buf := make([]byte, 64<<10)
 		send := func(p []byte) error {
@@ -318,11 +357,13 @@ func bridge(client net.Conn, up upstream, c *cryptoCtx, proto uint32, onBadDC fu
 		}
 	}()
 	go func() { // Telegram → клиент
-		defer func() { done <- struct{}{} }()
+		got := false
+		defer func() { upDone <- got }()
 		w := &watcher{proto: proto}
 		for {
 			data, err := up.recv()
 			if len(data) > 0 {
+				got = true
 				c.tgDec.XORKeyStream(data, data)
 				data, bad := w.scan(data)
 				c.clientEnc.XORKeyStream(data, data)
@@ -339,10 +380,18 @@ func bridge(client net.Conn, up upstream, c *cryptoCtx, proto uint32, onBadDC fu
 			}
 		}
 	}()
-	<-done
-	client.Close()
-	up.close()
-	<-done
+	select {
+	case <-clientDone:
+		client.Close()
+		up.close()
+		<-upDone
+		return false
+	case got := <-upDone:
+		client.Close()
+		up.close()
+		<-clientDone
+		return !got
+	}
 }
 
 // Probe проверяет, доходит ли прокси до Telegram: открывает соединение с дата-центром 2
@@ -422,7 +471,7 @@ func (s *Server) connect(ctx context.Context, dc int, media, test bool) (upstrea
 // затем напрямую в веб-серверы Telegram.
 func (s *Server) dialUpstream(ctx context.Context, k poolKey) (upstream, error) {
 	var errs []error
-	if s.Worker != "" {
+	if s.Worker != "" && !s.workerPaused() {
 		up, err := s.dialWorker(ctx, k)
 		if err == nil {
 			return up, nil

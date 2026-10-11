@@ -14,7 +14,7 @@
 
 import { connect } from "cloudflare:sockets";
 
-const VERSION = 2;
+const VERSION = 3;
 
 // Адреса дата-центров Telegram.
 const DC = {
@@ -42,83 +42,66 @@ function isTelegramWeb(host) {
   return WEB.some((d) => host === d || host.endsWith("." + d));
 }
 
-// IPv4-адреса сайта через DNS Cloudflare: подключение по имени из воркера к сайтам Telegram
+// IPv4-адрес сайта через DNS Cloudflare: подключение из воркера по имени к сайтам Telegram
 // не проходит, по адресу — проходит.
 async function resolveA(host) {
-  const r = await fetch(`https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(host)}&type=A`, {
-    headers: { accept: "application/dns-json" },
-  });
-  const j = await r.json();
-  return (j.Answer || []).filter((a) => a.type === 1).map((a) => a.data);
+  try {
+    const r = await fetch(`https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(host)}&type=A`, {
+      headers: { accept: "application/dns-json" },
+    });
+    const j = await r.json();
+    return (j.Answer || []).filter((a) => a.type === 1).map((a) => a.data);
+  } catch {
+    return [];
+  }
 }
 
-// Куда подключаться: адреса дата-центра или сайта Telegram, по порядку.
-async function targets(url) {
-  const host = url.searchParams.get("host") || url.searchParams.get("check");
-  if (host) {
-    if (!isTelegramWeb(host) || (url.searchParams.get("port") || "443") !== "443") {
-      return { error: "можно только сайты Telegram на порту 443", status: 403 };
-    }
-    let ips = [];
-    try {
-      ips = await resolveA(host);
-    } catch {}
-    return { list: [...ips, host] };
-  }
-  const table = url.searchParams.get("test") === "1" ? DC_TEST : DC;
-  const address = table[Number(url.searchParams.get("dc"))];
-  if (!address) {
-    return { error: "неизвестный дата-центр", status: 400 };
-  }
-  return { list: [address] };
-}
-
-// Открывает TCP к первому адресу, который ответил.
-async function open(list, log) {
-  let last = new Error("нет адресов");
-  for (const hostname of list) {
-    try {
-      const socket = connect({ hostname, port: 443 });
-      await socket.opened;
-      log?.push(`${hostname}: подключено`);
-      return socket;
-    } catch (e) {
-      last = e;
-      log?.push(`${hostname}: ${e?.message || e}`);
-    }
-  }
-  throw last;
+function text(body, status) {
+  return new Response(body, { status, headers: { "content-type": "text/plain; charset=utf-8" } });
 }
 
 export default {
   async fetch(request) {
     const url = new URL(request.url);
-    const t = await targets(url);
-    if (t.error) {
-      return new Response(t.error, { status: t.status });
+    const host = url.searchParams.get("host") || url.searchParams.get("check");
+    const upgrade = request.headers.get("Upgrade") === "websocket";
+
+    if (!upgrade && !url.searchParams.get("check")) {
+      return text(`FI worker: работает (версия ${VERSION})`, 200);
     }
 
-    if (request.headers.get("Upgrade") !== "websocket") {
-      if (!url.searchParams.get("check")) {
-        return new Response(`FI worker: работает (версия ${VERSION})`, { status: 200 });
+    // Куда подключаться.
+    let address;
+    if (host) {
+      if (!isTelegramWeb(host) || (url.searchParams.get("port") || "443") !== "443") {
+        return text("можно только сайты Telegram на порту 443", 403);
       }
-      const log = [];
+      address = (await resolveA(host))[0] || host;
+    } else {
+      const table = url.searchParams.get("test") === "1" ? DC_TEST : DC;
+      address = table[Number(url.searchParams.get("dc"))];
+      if (!address) {
+        return text("неизвестный дата-центр", 400);
+      }
+    }
+
+    // Проверка из браузера: удаётся ли открыть TCP.
+    if (!upgrade) {
       try {
-        const socket = await open(t.list, log);
+        const socket = connect({ hostname: address, port: 443 });
+        await socket.opened;
         socket.close().catch(() => {});
-      } catch {}
-      return new Response(log.join("\n") + "\n", { status: 200, headers: { "content-type": "text/plain; charset=utf-8" } });
+        return text(`${host} → ${address}: подключено\n`, 200);
+      } catch (e) {
+        return text(`${host} → ${address}: ${e?.message || e}\n`, 200);
+      }
     }
 
-    let socket;
-    try {
-      socket = await open(t.list);
-    } catch (e) {
-      return new Response("не удалось подключиться: " + (e?.message || e), { status: 502 });
-    }
-
+    // Сначала WebSocket, потом TCP — в таком порядке пересылка работает.
     const [client, server] = Object.values(new WebSocketPair());
     server.accept();
+
+    const socket = connect({ hostname: address, port: 443 });
     const writer = socket.writable.getWriter();
 
     server.addEventListener("message", (event) => {

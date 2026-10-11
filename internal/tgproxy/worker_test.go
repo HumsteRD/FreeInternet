@@ -73,6 +73,72 @@ func workerServer(t *testing.T, stream chan<- []byte, dc chan<- string) (*httpte
 	return srv, pool
 }
 
+// TestSilentWorkerIsBypassed: воркер принимает WebSocket и сразу закрывает его, ничего не
+// передав (так было со сломанным кодом воркера). Следующее соединение идёт в обход него.
+func TestSilentWorkerIsBypassed(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, rw, err := w.(http.Hijacker).Hijack()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		rw.WriteString("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n" +
+			"Sec-WebSocket-Accept: " + acceptKey(r.Header.Get("Sec-WebSocket-Key")) + "\r\n\r\n")
+		rw.Write([]byte{0x88, 0x00}) // кадр закрытия
+		rw.Flush()
+	}))
+	defer srv.Close()
+	certs := x509.NewCertPool()
+	certs.AddCert(srv.Certificate())
+	rootCAs = certs
+	defer func() { rootCAs = nil }()
+	_, port, _ := net.SplitHostPort(srv.Listener.Addr().String())
+	oldPort := workerPort
+	workerPort = port
+	defer func() { workerPort = oldPort }()
+
+	fallback := make(chan poolKey, 4)
+	secret := bytes.Repeat([]byte{9}, 16)
+	proxy := &Server{
+		Secret:   secret,
+		Worker:   "example.com",
+		PoolSize: -1,
+		dnsCache: map[string]dnsEntry{"example.com": {ips: []string{"127.0.0.1"}, at: time.Now()}},
+		wsUpstream: func(_ context.Context, k poolKey) (upstream, error) {
+			fallback <- k
+			return &fakeUp{}, nil
+		},
+	}
+	connectOnce := func() {
+		client, proxySide := net.Pipe()
+		defer client.Close()
+		done := make(chan struct{})
+		go func() { proxy.handle(context.Background(), proxySide); close(done) }()
+		init, _, _ := clientHandshake(secret, protoIntermediate, 2)
+		client.SetDeadline(time.Now().Add(5 * time.Second))
+		client.Write(init)
+		buf := make([]byte, 64)
+		client.Read(buf) // ждём, пока прокси закроет соединение
+		<-done
+	}
+
+	connectOnce()
+	if !proxy.workerPaused() {
+		t.Fatal("молчащий воркер не отложен")
+	}
+	select {
+	case <-fallback:
+		t.Fatal("первое соединение должно было пойти через воркер")
+	default:
+	}
+	connectOnce()
+	select {
+	case <-fallback:
+	case <-time.After(time.Second):
+		t.Fatal("после молчания воркера соединение не пошло в обход него")
+	}
+}
+
 // TestWorkerRoute: прокси идёт в Telegram через воркер, отдаёт ему поток байтов без разбивки
 // по кадрам, и на том конце получается ровно то, что ждёт сервер Telegram.
 func TestWorkerRoute(t *testing.T) {
