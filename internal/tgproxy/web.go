@@ -260,9 +260,9 @@ func (s *Server) dialWorkerTCP(ctx context.Context, host string, port int) (net.
 	return nil, errors.Join(errs...)
 }
 
-// WorkerVersionWeb — версия кода воркера, с которой работают мини-приложения: первая открывала
-// сайты Telegram по имени, а так из воркера они не открываются; во второй не шли данные.
-const WorkerVersionWeb = 3
+// WorkerVersionWeb — версия кода воркера, которая правильно пересылает данные: версии 1–4
+// неверно разбирали двоичные сообщения WebSocket, и до Telegram доходили не те байты.
+const WorkerVersionWeb = 5
 
 var workerVersionRe = regexp.MustCompile(`версия (\d+)`)
 

@@ -139,3 +139,21 @@ func TestLiveWorkerNoProto(t *testing.T) {
 	err = tc.HandshakeContext(ctx)
 	t.Logf("TLS tdesktop.com без Sec-WebSocket-Protocol: %v", err)
 }
+
+func TestLiveWorkerEcho(t *testing.T) {
+	worker := os.Getenv("FI_WORKER")
+	if worker == "" {
+		t.Skip("FI_WORKER не задан")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	ws, err := dialWS(ctx, net.JoinHostPort(worker, "443"), worker, "/?echo=1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ws.close()
+	ws.send([]byte{0x16, 0x03, 0x01, 0x00, 0xff})
+	ws.conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+	_, op, payload, err := ws.readFrame()
+	t.Logf("ответ воркера: op=%d %q %v", op, payload, err)
+}

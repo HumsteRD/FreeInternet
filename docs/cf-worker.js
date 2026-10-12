@@ -14,7 +14,7 @@
 
 import { connect } from "cloudflare:sockets";
 
-const VERSION = 4;
+const VERSION = 5;
 
 // Адреса дата-центров Telegram.
 const DC = {
@@ -64,6 +64,19 @@ function text(body, status) {
 }
 
 const errText = (e) => String(e?.message || e).slice(0, 110);
+
+// bytes — содержимое сообщения WebSocket как байты. Двоичное сообщение приходит не обязательно
+// ArrayBuffer'ом: прежние версии воркера писали в сокет не те байты и соединение рвалось.
+async function bytes(data) {
+  if (data instanceof ArrayBuffer) return new Uint8Array(data);
+  if (ArrayBuffer.isView(data)) return new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+  if (data && typeof data.arrayBuffer === "function") return new Uint8Array(await data.arrayBuffer());
+  if (typeof data === "string") return new TextEncoder().encode(data);
+  throw new Error("сообщение неизвестного вида: " + Object.prototype.toString.call(data));
+}
+
+const describe = (d) =>
+  `${Object.prototype.toString.call(d)} ${d?.constructor?.name ?? ""} ${d?.byteLength ?? d?.size ?? d?.length ?? "?"}`;
 
 // Самопроверка: что из воркера доходит до Telegram и где рвётся.
 async function selftest() {
@@ -126,6 +139,14 @@ export default {
       if (!url.searchParams.get("check")) return text(`FI worker: работает (версия ${VERSION})`, 200);
     }
 
+    // Отладка: в каком виде воркер получает сообщения WebSocket.
+    if (upgrade && url.searchParams.get("echo")) {
+      const [client, server] = Object.values(new WebSocketPair());
+      server.accept();
+      server.addEventListener("message", (event) => server.send("получено: " + describe(event.data)));
+      return new Response(null, { status: 101, webSocket: client });
+    }
+
     // Куда подключаться.
     let address;
     let port = Number(url.searchParams.get("port") || "443");
@@ -167,9 +188,13 @@ export default {
     const writer = socket.writable.getWriter();
     socket.closed.catch((e) => closeWith(1011, "tcp: " + errText(e)));
 
+    // Сообщения пишутся в сокет строго по очереди: разбор некоторых видов асинхронный.
+    let queue = Promise.resolve();
     server.addEventListener("message", (event) => {
-      const data = event.data instanceof ArrayBuffer ? new Uint8Array(event.data) : new TextEncoder().encode(event.data);
-      writer.write(data).catch((e) => closeWith(1011, "запись: " + errText(e)));
+      const data = event.data;
+      queue = queue
+        .then(async () => writer.write(await bytes(data)))
+        .catch((e) => closeWith(1011, "запись: " + errText(e)));
     });
     server.addEventListener("close", () => socket.close().catch(() => {}));
     server.addEventListener("error", () => socket.close().catch(() => {}));
