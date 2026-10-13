@@ -371,7 +371,7 @@ func redact(data []byte) []byte {
 		return data
 	}
 	if tg, ok := v["telegram"].(map[string]any); ok {
-		for _, key := range []string{"secret", "link"} {
+		for _, key := range []string{"secret", "link", "worker_key"} {
 			if _, ok := tg[key]; ok {
 				tg[key] = "(скрыто)"
 			}

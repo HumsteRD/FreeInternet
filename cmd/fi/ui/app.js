@@ -757,6 +757,7 @@ function settingsView(st) {
         }
       </div>
     </section>
+    ${viaWorkerSection(st)}
     <section class="stack">
       <div class="section-label"><span>Журнал и отчёт</span></div>
       <div class="panel">
@@ -771,6 +772,45 @@ function settingsView(st) {
       </div>
     </section>
     <p class="hint">Стратегий в наборе: ${st.strategies}</p>`;
+}
+
+// viaWorkerSection — сайты, которые закрыли для России сами сервисы: они идут через воркер.
+function viaWorkerSection(st) {
+  const tg = st.telegram ?? {};
+  const sites = st.via_worker ?? [];
+  let hint = 'Например, SoundCloud («Not available in Russian Federation»): обход DPI тут не поможет, сервис смотрит на страну. Сайт пойдёт через ваш Cloudflare Worker с не российского IP — в браузерах и в Telegram.';
+  let warn = false;
+  if (!tg.enabled) {
+    hint = 'Нужен включённый прокси для Telegram: сайты через воркер работают вместе с ним.';
+  } else if (!tg.worker) {
+    hint = 'Нужен свой Cloudflare Worker — задайте его выше, в разделе Telegram. ' + hint;
+  } else if (sites.length && (tg.worker_key_ok === false || tg.worker_outdated)) {
+    warn = true;
+    hint = 'В воркере старый код: нажмите «Скопировать код воркера», вставьте его в Cloudflare (Edit code → Deploy) и нажмите «Проверить воркер».';
+  }
+  return `<section class="stack">
+      <div class="section-label"><span>Сайты через воркер</span></div>
+      <div class="panel">
+        <div class="settings-row column">
+          <span class="row-text"><span class="row-title-sm">Сайты, закрытые для России самими сервисами</span><span class="row-sub wrap"${warn ? ' style="color: var(--amber-text)"' : ''}>${esc(hint)}</span></span>
+          ${
+            sites.length
+              ? `<div class="chips">${sites
+                  .map((h) => `<button class="chip" data-action="via-worker-remove" data-host="${esc(h)}" title="Убрать">${esc(h)} ×</button>`)
+                  .join('')}</div>`
+              : ''
+          }
+          <form class="input-row" data-form="via-worker">
+            <label class="input"><input id="via-worker-input" name="host" autocomplete="off" spellcheck="false" placeholder="soundcloud.com" value="${esc(state.viaWorker ?? '')}"></label>
+            <button class="btn sm" type="submit" ${!tg.enabled || !tg.worker ? 'disabled' : ''}>Добавить</button>
+          </form>
+          <div class="button-row">
+            <button class="btn sm" data-action="worker-copy">Скопировать код воркера</button>
+            <button class="btn sm ghost" data-action="worker-recheck" ${!tg.worker ? 'disabled' : ''}>Проверить воркер</button>
+          </div>
+        </div>
+      </div>
+    </section>`;
 }
 
 function unavailableView() {
@@ -1024,6 +1064,15 @@ document.addEventListener('click', (event) => {
     case 'tg-shared-cf':
       command('set_telegram_shared_cf', { on: !state.status?.telegram?.shared_cf });
       break;
+    case 'via-worker-remove':
+      command('remove_via_worker', { host: el.dataset.host });
+      break;
+    case 'worker-copy':
+      fileAction('/app/worker/copy', () => 'Код воркера скопирован. В Cloudflare: воркер → Edit code → стереть всё, вставить → Deploy, затем «Проверить воркер».');
+      break;
+    case 'worker-recheck':
+      command('recheck_worker');
+      break;
     case 'custom-add':
       fileAction('/app/strategy/import', (d) => (d.name ? `Стратегия «${d.name}» добавлена — её можно выбрать в списке или запустить подбор` : ''));
       break;
@@ -1134,10 +1183,16 @@ document.addEventListener('click', (event) => {
 
 document.addEventListener('submit', (event) => {
   const form = event.target.dataset.form;
-  if (form !== 'site' && form !== 'worker') return;
+  if (form !== 'site' && form !== 'worker' && form !== 'via-worker') return;
   event.preventDefault();
   if (form === 'site') {
     addSite();
+    return;
+  }
+  if (form === 'via-worker') {
+    const host = document.getElementById('via-worker-input')?.value ?? '';
+    state.viaWorker = null;
+    command('add_via_worker', { host });
     return;
   }
   const host = document.getElementById('worker-input')?.value ?? '';
@@ -1148,6 +1203,10 @@ document.addEventListener('submit', (event) => {
 document.addEventListener('input', (event) => {
   if (event.target.id === 'worker-input') {
     state.worker = event.target.value;
+    return;
+  }
+  if (event.target.id === 'via-worker-input') {
+    state.viaWorker = event.target.value;
     return;
   }
   if (event.target.id !== 'site-input') return;

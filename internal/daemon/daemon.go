@@ -67,6 +67,7 @@ type Status struct {
 	Strategies   int             `json:"strategies"`
 	StrategyList []string        `json:"strategy_list"` // что можно выбрать вручную
 	Custom       []string        `json:"custom_strategies"`
+	ViaWorker    []string        `json:"via_worker"` // сайты через воркер
 	GameMode     string          `json:"game_mode"`
 	Games        []string        `json:"games"`
 	GameList     []strategy.Game `json:"game_profiles"`
@@ -111,16 +112,17 @@ type Daemon struct {
 	checkedAt      time.Time
 	lastSelect     time.Time
 
-	tg        *tgproxy.Server
-	tgStop    context.CancelFunc
-	tgDone    chan struct{}
-	tgErr     string
-	tgCF      []string  // общие домены Cloudflare (tg-ws-proxy)
-	tgCFAt    time.Time // когда их обновляли
-	web       *tgproxy.WebProxy
-	webDone   chan struct{}
-	webErr    string
-	workerVer int // версия кода воркера; 0 — не знаем
+	tg          *tgproxy.Server
+	tgStop      context.CancelFunc
+	tgDone      chan struct{}
+	tgErr       string
+	tgCF        []string  // общие домены Cloudflare (tg-ws-proxy)
+	tgCFAt      time.Time // когда их обновляли
+	web         *tgproxy.WebProxy
+	webDone     chan struct{}
+	webErr      string
+	workerVer   int   // версия кода воркера; 0 — не знаем
+	workerKeyOK *bool // в воркере код с ключом FI; nil — не проверяли
 
 	http          *http.Client
 	base          manifest // установленный набор
@@ -166,6 +168,7 @@ func New(dataDir string, log *slog.Logger) (*Daemon, error) {
 	d.loadCustom()
 	d.rebuildStrategiesLocked()
 	d.ensureTelegramSecret()
+	d.ensureWorkerKey()
 	d.ensureFamilies()
 	d.loadCFCache()
 	return d, nil
@@ -239,6 +242,7 @@ func (d *Daemon) Status() Status {
 		Strategies:   len(d.strategies),
 		StrategyList: strategyNames(d.strategies),
 		Custom:       d.customNamesLocked(),
+		ViaWorker:    slices.Clone(d.cfg.ViaWorker),
 		GameMode:     d.cfg.GameMode,
 		Games:        slices.Clone(d.cfg.Games),
 		GameList:     strategy.Games,

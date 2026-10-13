@@ -65,15 +65,39 @@ func (d *Daemon) checkWorkerVersion(ctx context.Context, worker string) {
 	if ver < tgproxy.WorkerVersionWeb {
 		d.log.Warn("код воркера устарел — мини-приложения через него не откроются", "worker", worker, "version", ver)
 	}
+	if len(d.cfg.ViaWorker) > 0 {
+		key := d.cfg.Telegram.WorkerKey
+		go d.checkWorkerKey(ctx, worker, key)
+	}
 }
 
-// startMiniAppsLocked запускает прокси для мини-приложений рядом с прокси Telegram srv.
-// Возвращает канал, который закроется, когда прокси остановится; nil — не запускался.
+// checkWorkerKey узнаёт, вставлен ли в воркер код с ключом FI: без него сайты через воркер не откроются.
+func (d *Daemon) checkWorkerKey(ctx context.Context, worker, key string) {
+	ok, err := tgproxy.WorkerKeyOK(ctx, d.http, worker, key)
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if err != nil || d.cfg.Telegram.Worker != worker || d.cfg.Telegram.WorkerKey != key {
+		return
+	}
+	d.workerKeyOK = &ok
+	if !ok {
+		d.log.Warn("в воркере нет ключа FI — сайты через воркер не откроются; скопируйте код воркера из FI", "worker", worker)
+	}
+}
+
+// webProxyNeededLocked — нужен ли локальный прокси: для мини-приложений или сайтов через воркер.
+func (d *Daemon) webProxyNeededLocked() bool {
+	return d.cfg.Telegram.MiniApps || len(d.cfg.ViaWorker) > 0
+}
+
+// startMiniAppsLocked запускает локальный прокси (мини-приложения, сайты через воркер) рядом
+// с прокси Telegram srv. Возвращает канал, который закроется, когда прокси остановится;
+// nil — не запускался.
 func (d *Daemon) startMiniAppsLocked(ctx context.Context, srv *tgproxy.Server) chan struct{} {
-	if !d.cfg.Telegram.MiniApps {
+	if !d.webProxyNeededLocked() {
 		return nil
 	}
-	web := &tgproxy.WebProxy{Addr: miniAppsAddr(d.cfg.Telegram.Port), Server: srv}
+	web := &tgproxy.WebProxy{Addr: miniAppsAddr(d.cfg.Telegram.Port), Server: srv, ViaWorker: d.viaWorkerList}
 	d.web = web
 	if worker := d.cfg.Telegram.Worker; worker != "" {
 		go d.checkWorkerVersion(ctx, worker)

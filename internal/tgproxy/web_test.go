@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 )
@@ -21,9 +22,67 @@ func TestIsTelegramWeb(t *testing.T) {
 			t.Errorf("IsTelegramWeb(%q) = %v", host, got)
 		}
 	}
-	pac := PAC("127.0.0.1:1454")
+	pac := PAC("127.0.0.1:1454", nil, "")
 	if !strings.Contains(pac, `dnsDomainIs(host, ".telegram.org")) return "PROXY 127.0.0.1:1454; DIRECT"`) || !strings.Contains(pac, `return "DIRECT";`) {
 		t.Fatalf("PAC:\n%s", pac)
+	}
+	// Сайты через воркер и прежний прокси (VPN-клиента) для остального.
+	pac = PAC("127.0.0.1:1454", []string{"soundcloud.com", `evil"); alert(1); ("`}, "127.0.0.1:10809")
+	if !strings.Contains(pac, `dnsDomainIs(host, ".soundcloud.com")) return "PROXY 127.0.0.1:1454; PROXY 127.0.0.1:10809; DIRECT"`) ||
+		!strings.Contains(pac, `return "PROXY 127.0.0.1:10809; DIRECT";`) || strings.Contains(pac, "alert") {
+		t.Fatalf("PAC с сайтами через воркер:\n%s", pac)
+	}
+	if pac := PAC("127.0.0.1:1454", nil, `x"; alert(1)`); strings.Contains(pac, "alert") {
+		t.Fatalf("прежний прокси попал в PAC без проверки:\n%s", pac)
+	}
+}
+
+func TestWorkerCode(t *testing.T) {
+	docs, err := os.ReadFile("../../docs/cf-worker.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.ReplaceAll(string(docs), "\r\n", "\n") != strings.ReplaceAll(workerSource, "\r\n", "\n") {
+		t.Fatal("internal/tgproxy/cf-worker.js отличается от docs/cf-worker.js — скопируйте docs/cf-worker.js")
+	}
+	code := WorkerCode("k3y")
+	if !strings.Contains(code, `const KEY = "k3y";`) || strings.Contains(code, workerKeyLine) {
+		t.Fatal("ключ не вставлен в код воркера")
+	}
+}
+
+func TestWebProxyViaWorkerSites(t *testing.T) {
+	directCalls := 0
+	p := &WebProxy{
+		Server:    &Server{Worker: "fi.example.workers.dev"},
+		ViaWorker: func() []string { return []string{"soundcloud.com"} },
+		dialDirect: func(context.Context, string) (net.Conn, error) {
+			directCalls++
+			return echoUpstream("direct:"), nil
+		},
+		dialWorker: func(_ context.Context, host string, _ int) (net.Conn, error) {
+			return echoUpstream("worker:" + host + ":"), nil
+		},
+	}
+	srv := httptest.NewServer(p)
+	defer srv.Close()
+	if code, got := tunnel(t, srv, "api-v2.soundcloud.com:443"); code != 200 || got != "worker:api-v2.soundcloud.com:ping" {
+		t.Fatalf("сайт через воркер: %d %q", code, got)
+	}
+	if directCalls != 0 {
+		t.Fatal("сайт через воркер пробовали напрямую — получили бы «недоступно в вашей стране»")
+	}
+	if code, _ := tunnel(t, srv, "example.com:443"); code != http.StatusForbidden {
+		t.Fatalf("сайт не из списка: %d", code)
+	}
+	resp, err := http.Get(srv.URL + SitesPACPath + "?fallback=127.0.0.1:10809")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if !strings.Contains(string(body), "soundcloud.com") || !strings.Contains(string(body), "PROXY 127.0.0.1:10809") {
+		t.Fatalf("PAC для браузеров:\n%s", body)
 	}
 }
 

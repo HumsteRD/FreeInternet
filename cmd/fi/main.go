@@ -78,6 +78,7 @@ func main() {
 	mux.HandleFunc("POST /app/autostart", t.handleAutostart)
 	mux.HandleFunc("POST /app/theme", t.handleTheme)
 	mux.HandleFunc("POST /app/release", t.handleRelease)
+	mux.HandleFunc("POST /app/worker/copy", t.handleWorkerCopy)
 	mux.HandleFunc("POST /app/telegram/open", t.handleTelegramOpen)
 	mux.HandleFunc("POST /app/telegram/copy", t.handleTelegramCopy)
 	mux.HandleFunc("POST /app/telegram/clients", t.handleTelegramClients)
@@ -185,6 +186,7 @@ type tray struct {
 	poke      chan struct{}
 	notified  map[string]time.Time // только из watch
 	alerts    serviceAlerts        // только из watch
+	pacErr    string               // только из watch: последняя ошибка системного PAC, чтобы не повторять в журнале
 	exe       string               // свой файл: если установщик его заменил, окно перезапускается
 	exeTime   time.Time
 
@@ -209,6 +211,9 @@ type status struct {
 		UpdateAvailable bool   `json:"update_available"`
 		Configured      bool   `json:"configured"`
 	} `json:"app"`
+	Telegram struct {
+		SitesPAC string `json:"sites_pac"`
+	} `json:"telegram"`
 	Task *struct {
 		Kind string `json:"kind"`
 	} `json:"task"`
@@ -326,6 +331,9 @@ func (t *tray) watch(showOnStart bool) {
 			lastTip = tip
 		}
 		t.setPauseLabel(st != nil && st.Enabled)
+		if st != nil {
+			t.syncSitesPAC(st.Telegram.SitesPAC)
+		}
 		t.notifyChanges(prev, st)
 		prev = st
 
@@ -713,6 +721,24 @@ func (t *tray) handleTelegramCopy(w http.ResponseWriter, _ *http.Request) {
 	if err == nil && !application.InvokeSyncWithResult(func() bool { return t.app.Clipboard.SetText(link) }) {
 		err = errors.New("не удалось скопировать ссылку")
 	}
+	if err != nil {
+		resp["error"] = err.Error()
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// handleWorkerCopy копирует код Cloudflare Worker с ключом этого FI: его вставляют в воркер.
+func (t *tray) handleWorkerCopy(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+	var res struct {
+		Code string `json:"code"`
+	}
+	err := t.call(ctx, "worker_code", nil, &res)
+	if err == nil && (res.Code == "" || !application.InvokeSyncWithResult(func() bool { return t.app.Clipboard.SetText(res.Code) })) {
+		err = errors.New("не удалось скопировать код воркера")
+	}
+	resp := map[string]string{}
 	if err != nil {
 		resp["error"] = err.Error()
 	}

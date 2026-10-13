@@ -36,6 +36,10 @@ type TelegramStatus struct {
 	MiniAppsError string `json:"mini_apps_error,omitempty"`
 	// WorkerOutdated — код воркера старый: сайты Telegram для мини-приложений он не откроет.
 	WorkerOutdated bool `json:"worker_outdated,omitempty"`
+	// WorkerKeyOK — в воркере код с ключом FI (нужен сайтам через воркер); nil — не проверяли.
+	WorkerKeyOK *bool `json:"worker_key_ok,omitempty"`
+	// SitesPAC — PAC для браузеров, пока сайты через воркер работают: окно ставит его в Windows.
+	SitesPAC string `json:"sites_pac,omitempty"`
 	tgproxy.Stats
 }
 
@@ -81,7 +85,15 @@ func (d *Daemon) telegramStatusLocked() TelegramStatus {
 	}
 	if st.Enabled && st.MiniApps {
 		st.MiniAppsError = d.webErr
-		st.WorkerOutdated = st.Worker != "" && d.workerVer > 0 && d.workerVer < tgproxy.WorkerVersionWeb
+	}
+	if st.Enabled && st.Worker != "" {
+		st.WorkerOutdated = d.workerVer > 0 && d.workerVer < tgproxy.WorkerVersionWeb
+		if len(d.cfg.ViaWorker) > 0 {
+			st.WorkerKeyOK = d.workerKeyOK
+			if d.web != nil && d.web.Listening() {
+				st.SitesPAC = "http://" + miniAppsAddr(d.cfg.Telegram.Port) + tgproxy.SitesPACPath
+			}
+		}
 	}
 	if secret, err := hex.DecodeString(d.cfg.Telegram.Secret); err == nil && len(secret) == 16 {
 		st.Link = tgproxy.Link(st.Address, secret)
@@ -239,6 +251,7 @@ func (d *Daemon) startTelegram() {
 		Addr:           telegramAddr(d.cfg.Telegram.Port),
 		Secret:         secret,
 		Worker:         d.cfg.Telegram.Worker,
+		WorkerKey:      d.cfg.Telegram.WorkerKey,
 		Log:            d.log,
 		LookupFallback: probe.LookupDoH,
 	}

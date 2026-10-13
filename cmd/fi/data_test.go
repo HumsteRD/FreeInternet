@@ -58,8 +58,8 @@ func TestAlertsOnlyConfirmedFailures(t *testing.T) {
 }
 
 func TestRedactHidesProxySecret(t *testing.T) {
-	out := string(redact([]byte(`{"telegram":{"secret":"abc123","link":"tg://proxy?secret=abc123","port":1453}}`)))
-	if strings.Contains(out, "abc123") {
+	out := string(redact([]byte(`{"telegram":{"secret":"abc123","link":"tg://proxy?secret=abc123","worker_key":"k3yk3y","port":1453}}`)))
+	if strings.Contains(out, "abc123") || strings.Contains(out, "k3yk3y") {
 		t.Fatalf("секрет попал в отчёт: %s", out)
 	}
 	var v map[string]map[string]any

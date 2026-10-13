@@ -8,7 +8,9 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -32,14 +34,18 @@ var webDomains = []string{
 const (
 	webDirectTimeout = 2 * time.Second
 	webDirectPause   = 5 * time.Minute // после неудачи напрямую сайт какое-то время идёт сразу через воркер
-	// PACPath — путь файла PAC на локальном прокси.
-	PACPath = "/telegram.pac"
+	// PACPath — PAC для окон мини-приложений Telegram, SitesPACPath — для браузеров
+	// (системный, с прокси, который был задан до FI, — например VPN-клиента).
+	PACPath      = "/telegram.pac"
+	SitesPACPath = "/sites.pac"
 )
 
 // IsTelegramWeb — сайт принадлежит Telegram и нужен мини-приложениям.
-func IsTelegramWeb(host string) bool {
+func IsTelegramWeb(host string) bool { return inDomains(host, webDomains) }
+
+func inDomains(host string, domains []string) bool {
 	host = strings.ToLower(strings.TrimSuffix(host, "."))
-	for _, d := range webDomains {
+	for _, d := range domains {
 		if host == d || strings.HasSuffix(host, "."+d) {
 			return true
 		}
@@ -47,24 +53,39 @@ func IsTelegramWeb(host string) bool {
 	return false
 }
 
-// PAC — файл автонастройки прокси для окон мини-приложений: HTTPS к сайтам Telegram — через
-// FI, а если FI не запущен — напрямую; всё остальное — напрямую.
-func PAC(proxyAddr string) string {
+// fallbackPattern — каким может быть прежний прокси в PAC: адрес:порт, без кавычек и пробелов.
+var fallbackPattern = regexp.MustCompile(`^[A-Za-z0-9.\-]{1,100}:[0-9]{1,5}$`)
+
+// PAC — файл автонастройки прокси: HTTPS к сайтам Telegram и к сайтам «через воркер» — через FI,
+// а если FI не запущен — как обычно; остальное — через прежний прокси (fallback) или напрямую.
+func PAC(proxyAddr string, viaWorker []string, fallback string) string {
+	other := "DIRECT"
+	if fallbackPattern.MatchString(fallback) {
+		other = "PROXY " + fallback + "; DIRECT"
+	}
 	var b strings.Builder
 	b.WriteString("function FindProxyForURL(url, host) {\n")
-	b.WriteString("  if (url.substring(0, 6) != \"https:\") return \"DIRECT\";\n")
+	fmt.Fprintf(&b, "  if (url.substring(0, 6) != \"https:\") return %q;\n", other)
 	b.WriteString("  host = host.toLowerCase();\n")
-	for _, d := range webDomains {
-		fmt.Fprintf(&b, "  if (host == %q || dnsDomainIs(host, %q)) return \"PROXY %s; DIRECT\";\n", d, "."+d, proxyAddr)
+	for _, d := range append(slices.Clone(webDomains), viaWorker...) {
+		if !hostPattern.MatchString(d) {
+			continue
+		}
+		fmt.Fprintf(&b, "  if (host == %q || dnsDomainIs(host, %q)) return \"PROXY %s; %s\";\n", d, "."+d, proxyAddr, other)
 	}
-	b.WriteString("  return \"DIRECT\";\n}\n")
+	fmt.Fprintf(&b, "  return %q;\n}\n", other)
 	return b.String()
 }
 
-// WebProxy — локальный HTTP-прокси для мини-приложений.
+var hostPattern = regexp.MustCompile(`^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9-]{2,63}$`)
+
+// WebProxy — локальный HTTP-прокси для мини-приложений Telegram и сайтов «через воркер».
 type WebProxy struct {
 	Addr   string
 	Server *Server // воркер и поиск адресов берутся у прокси Telegram
+	// ViaWorker — сайты, которые всегда идут через воркер: их закрыли для России сами сервисы,
+	// и нужен не российский IP. Поддомены входят сами.
+	ViaWorker func() []string
 
 	// dialDirect и dialWorker подменяются в тестах.
 	dialDirect func(ctx context.Context, addr string) (net.Conn, error)
@@ -105,29 +126,47 @@ func (p *WebProxy) ListenAndServe(ctx context.Context) error {
 	return nil
 }
 
+func (p *WebProxy) viaWorker() []string {
+	if p.ViaWorker == nil {
+		return nil
+	}
+	return p.ViaWorker()
+}
+
 func (p *WebProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	isGet := r.Method == http.MethodGet && r.URL.Host == ""
 	switch {
-	case r.Method == http.MethodGet && r.URL.Path == PACPath && r.URL.Host == "":
+	case isGet && r.URL.Path == PACPath:
 		w.Header().Set("Content-Type", "application/x-ns-proxy-autoconfig")
-		io.WriteString(w, PAC(p.Addr))
+		io.WriteString(w, PAC(p.Addr, p.viaWorker(), ""))
+	case isGet && r.URL.Path == SitesPACPath:
+		w.Header().Set("Content-Type", "application/x-ns-proxy-autoconfig")
+		io.WriteString(w, PAC(p.Addr, p.viaWorker(), r.URL.Query().Get("fallback")))
 	case r.Method == http.MethodConnect:
 		p.connect(w, r)
 	default:
-		http.Error(w, "FI: только CONNECT к сайтам Telegram", http.StatusMethodNotAllowed)
+		http.Error(w, "FI: только CONNECT к сайтам Telegram и сайтам через воркер", http.StatusMethodNotAllowed)
 	}
 }
 
 func (p *WebProxy) connect(w http.ResponseWriter, r *http.Request) {
 	host, portText, err := net.SplitHostPort(r.Host)
 	port, perr := strconv.Atoi(portText)
-	if err != nil || perr != nil || port != 443 || !IsTelegramWeb(host) {
-		// Чужие сайты сюда не попадают — их PAC отправляет напрямую. Открытым прокси быть незачем.
-		http.Error(w, "FI: только сайты Telegram", http.StatusForbidden)
+	geo := err == nil && inDomains(host, p.viaWorker()) && !IsTelegramWeb(host)
+	if err != nil || perr != nil || port != 443 || !(IsTelegramWeb(host) || geo) {
+		// Чужие сайты сюда не попадают — их PAC отправляет мимо FI. Открытым прокси быть незачем.
+		http.Error(w, "FI: только сайты Telegram и сайты через воркер", http.StatusForbidden)
 		return
 	}
-	upstream, err := p.dial(r.Context(), host, port)
+	var upstream net.Conn
+	if geo {
+		// Сайт закрыт для России самим сервисом: напрямую он ответит «недоступно в вашей стране».
+		upstream, err = p.workerOnly(r.Context(), host, port)
+	} else {
+		upstream, err = p.dial(r.Context(), host, port)
+	}
 	if err != nil {
-		p.logf("мини-приложения: %s недоступен: %v", host, err)
+		p.logf("%s недоступен: %v", host, err)
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
@@ -171,6 +210,13 @@ func (p *WebProxy) dial(ctx context.Context, host string, port int) (net.Conn, e
 		return nil, errors.Join(append(errs, err)...)
 	}
 	return conn, nil
+}
+
+func (p *WebProxy) workerOnly(ctx context.Context, host string, port int) (net.Conn, error) {
+	if p.Server == nil || p.Server.Worker == "" {
+		return nil, errors.New("сайты через воркер работают только со своим Cloudflare Worker")
+	}
+	return p.worker(ctx, host, port)
 }
 
 func (p *WebProxy) direct(ctx context.Context, addr string) (net.Conn, error) {
@@ -235,7 +281,10 @@ func relay(client net.Conn, clientBuf *bufio.Reader, upstream net.Conn) {
 
 // dialWorkerTCP открывает через Cloudflare Worker сырое TCP-соединение с сайтом Telegram.
 func (s *Server) dialWorkerTCP(ctx context.Context, host string, port int) (net.Conn, error) {
-	path := fmt.Sprintf("/?host=%s&port=%d", host, port)
+	path := fmt.Sprintf("/?host=%s&port=%d", url.QueryEscape(host), port)
+	if s.WorkerKey != "" {
+		path += "&key=" + url.QueryEscape(s.WorkerKey)
+	}
 	var errs []error
 	for _, ip := range s.resolve(ctx, s.Worker, 0) {
 		dialCtx, cancel := context.WithTimeout(ctx, dialTimeout)
@@ -251,6 +300,8 @@ func (s *Server) dialWorkerTCP(ctx context.Context, host string, port int) (net.
 			return nil, fmt.Errorf("воркер %s не умеет открывать сайты Telegram — обновите его код из FI", s.Worker)
 		case errors.As(err, &se) && se.code == http.StatusBadGateway:
 			return nil, fmt.Errorf("воркер %s не смог подключиться к %s", s.Worker, host)
+		case errors.As(err, &se) && se.code == http.StatusForbidden:
+			return nil, fmt.Errorf("воркер %s не пускает к %s: вставьте в него код из FI («Скопировать код воркера»)", s.Worker, host)
 		}
 		errs = append(errs, fmt.Errorf("воркер %s через %s: %w", s.Worker, ip, err))
 	}
@@ -288,6 +339,22 @@ func WorkerVersion(ctx context.Context, client *http.Client, worker string) (int
 		return strconv.Atoi(m[1])
 	}
 	return 1, nil
+}
+
+// WorkerKeyOK проверяет, что в воркере стоит код с этим ключом FI.
+func WorkerKeyOK(ctx context.Context, client *http.Client, worker, key string) (bool, error) {
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://"+worker+"/?keycheck=1&key="+url.QueryEscape(key), nil)
+	if err != nil {
+		return false, err
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return false, err
+	}
+	resp.Body.Close()
+	return resp.StatusCode == http.StatusOK, nil
 }
 
 // wsStream — соединение WebSocket с воркером как обычный поток байтов.

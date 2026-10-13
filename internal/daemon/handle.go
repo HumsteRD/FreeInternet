@@ -108,6 +108,18 @@ func (d *Daemon) Handle(ctx context.Context, method string, params json.RawMessa
 		if err = decode(params, &p); err == nil {
 			err = d.RemoveCustomStrategy(p.Name)
 		}
+	case "add_via_worker":
+		if err = decode(params, &host); err == nil {
+			err = d.AddViaWorker(host.Host)
+		}
+	case "remove_via_worker":
+		if err = decode(params, &host); err == nil {
+			err = d.RemoveViaWorker(host.Host)
+		}
+	case "worker_code":
+		return map[string]string{"code": d.WorkerCode()}, nil
+	case "recheck_worker":
+		d.recheckWorker()
 	case "set_telegram_mini_apps":
 		if err = decode(params, &on); err == nil {
 			err = d.SetTelegramMiniApps(on.On)

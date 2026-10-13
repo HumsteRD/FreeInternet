@@ -1,20 +1,26 @@
 // Cloudflare Worker для FI: принимает WebSocket и перекладывает байты в дата-центр Telegram
-// (?dc=N) или на сайт Telegram для мини-приложений (?host=telegram.org&port=443).
+// (?dc=N), на сайт Telegram для мини-приложений (?host=telegram.org&port=443) или — с ключом
+// FI — на сайты, закрытые для России самими сервисами (SoundCloud и другие).
 // Нужен там, где адреса Telegram закрыты по IP, а Cloudflare открыт.
 //
 // Как поставить:
 //   1. dash.cloudflare.com → Compute → Workers & Pages → Create application →
 //      Start with Hello World! → имя (например fi-tg) → Deploy.
-//   2. Edit code: стереть шаблон в worker.js, вставить этот файл целиком → Deploy.
+//   2. Edit code: стереть шаблон в worker.js, вставить код целиком → Deploy. Код с ключом
+//      копирует сам FI: Настройки → «Сайты через воркер» → «Скопировать код воркера».
 //   3. Адрес воркера (fi-tg.имя.workers.dev) вписать в FI без https://:
 //      Настройки → Telegram → «Свой Cloudflare Worker» → Сохранить.
 //
 // Воркер ничего не расшифровывает: внутри соединения идёт MTProto или TLS, ключи знают только
-// Telegram и ваш клиент. Самопроверка: https://<адрес воркера>/?selftest=1
+// Telegram (сайт) и ваш клиент. Самопроверка: https://<адрес воркера>/?selftest=1
 
 import { connect } from "cloudflare:sockets";
 
-const VERSION = 5;
+const VERSION = 6;
+
+// KEY — секрет FI: с ним воркер пускает к любым сайтам, без него — только к Telegram, чтобы
+// воркером не воспользовались как открытым прокси. FI вписывает его сам при копировании кода.
+const KEY = "";
 
 // Адреса дата-центров Telegram.
 const DC = {
@@ -133,10 +139,12 @@ export default {
     const url = new URL(request.url);
     const host = url.searchParams.get("host") || url.searchParams.get("check");
     const upgrade = request.headers.get("Upgrade") === "websocket";
+    const keyed = KEY !== "" && url.searchParams.get("key") === KEY;
 
     if (!upgrade) {
       if (url.searchParams.get("selftest")) return text(await selftest(), 200);
-      if (!url.searchParams.get("check")) return text(`FI worker: работает (версия ${VERSION})`, 200);
+      if (url.searchParams.get("keycheck")) return text(keyed ? "ключ верный" : "ключ неверный", keyed ? 200 : 403);
+      if (!url.searchParams.get("check")) return text(`FI worker: работает (версия ${VERSION}${KEY ? ", с ключом" : ""})`, 200);
     }
 
     // Отладка: в каком виде воркер получает сообщения WebSocket.
@@ -151,9 +159,11 @@ export default {
     let address;
     let port = Number(url.searchParams.get("port") || "443");
     if (host) {
-      if (!isTelegramWeb(host) || port !== 443) {
-        return text("можно только сайты Telegram на порту 443", 403);
+      if (port !== 443) return text("можно только порт 443", 403);
+      if (!isTelegramWeb(host) && !keyed) {
+        return text("без ключа FI можно только сайты Telegram — скопируйте код воркера из FI", 403);
       }
+      if (!/^[a-z0-9.-]+$/i.test(host) || /^[0-9.]+$/.test(host)) return text("нужно имя сайта, а не адрес", 403);
       address = (await resolveA(host))[0] || host;
     } else {
       const table = url.searchParams.get("test") === "1" ? DC_TEST : DC;

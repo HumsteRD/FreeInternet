@@ -79,7 +79,9 @@ type Server struct {
 	Secret   []byte // 16 байт
 	PoolSize int    // готовых соединений на дата-центр: 0 — по умолчанию, меньше нуля — без пула
 	Worker   string // домен Cloudflare Worker: путь в Telegram, когда его адреса закрыты по IP
-	Log      *slog.Logger
+	// WorkerKey — ключ FI в коде воркера: с ним воркер пускает к сайтам «через воркер».
+	WorkerKey string
+	Log       *slog.Logger
 	// LookupFallback ищет адрес, когда системный DNS не ответил (например, DNS поверх HTTPS):
 	// провайдеры часто не резолвят общие домены Cloudflare. nil — только системный DNS.
 	LookupFallback func(ctx context.Context, host string) (string, error)

@@ -55,6 +55,9 @@ type Config struct {
 	CheckEvery Duration        `json:"check_every"`
 	Sites      []Site          `json:"sites"`
 	Telegram   Telegram        `json:"telegram"`
+	// ViaWorker — сайты, которые идут через Cloudflare Worker: их закрыли для России сами
+	// сервисы («Not available in your country»), и нужен не российский IP.
+	ViaWorker []string `json:"via_worker,omitempty"`
 }
 
 // Telegram — встроенный прокси для Telegram Desktop.
@@ -69,6 +72,9 @@ type Telegram struct {
 	// MiniApps — пускать сайты Telegram для мини-приложений через локальный прокси FI
 	// (порт Port+1), а если их адреса закрыты — через Worker.
 	MiniApps bool `json:"mini_apps"`
+	// WorkerKey — секрет, который FI вписывает в код воркера: с ним воркер пускает к сайтам
+	// «через воркер», без него — только к Telegram. Создаётся при первом запуске.
+	WorkerKey string `json:"worker_key,omitempty"`
 }
 
 func Default() Config {
