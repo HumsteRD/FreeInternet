@@ -79,6 +79,7 @@ func main() {
 	mux.HandleFunc("POST /app/theme", t.handleTheme)
 	mux.HandleFunc("POST /app/release", t.handleRelease)
 	mux.HandleFunc("POST /app/worker/copy", t.handleWorkerCopy)
+	mux.HandleFunc("POST /app/worker/deploy", t.handleWorkerDeploy)
 	mux.HandleFunc("POST /app/telegram/open", t.handleTelegramOpen)
 	mux.HandleFunc("POST /app/telegram/copy", t.handleTelegramCopy)
 	mux.HandleFunc("POST /app/telegram/clients", t.handleTelegramClients)

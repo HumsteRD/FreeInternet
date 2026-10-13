@@ -752,6 +752,18 @@ function settingsView(st) {
                   <label class="input"><input id="worker-input" name="host" autocomplete="off" spellcheck="false" placeholder="имя-1234.логин.workers.dev" value="${esc(state.worker ?? tg.worker ?? '')}"></label>
                   <button class="btn sm" type="submit">Сохранить</button>
                 </form>
+              </div>
+              <div class="settings-row column">
+                <span class="row-text"><span class="row-title-sm">Развернуть воркер автоматически</span><span class="row-sub wrap">FI сам загрузит воркер в ваш аккаунт Cloudflare и закрепит его в выбранной стране — её IP увидят сайты через воркер. Нужен токен: dash.cloudflare.com → My Profile → API Tokens → Create Token → шаблон «Edit Cloudflare Workers». FI его не сохраняет.</span></span>
+                <form class="input-row" data-form="worker-deploy">
+                  <label class="input"><input id="cf-token-input" type="password" autocomplete="off" spellcheck="false" placeholder="токен Cloudflare" value="${esc(state.cfToken ?? '')}"></label>
+                  <select class="select" id="cf-region" style="flex: none; width: auto">
+                    ${[['de', 'Германия'], ['nl', 'Нидерланды'], ['us', 'США']]
+                      .map(([v, l]) => `<option value="${v}" ${(state.cfRegion ?? 'de') === v ? 'selected' : ''}>${l}</option>`)
+                      .join('')}
+                  </select>
+                </form>
+                <div class="button-row"><button class="btn sm primary" data-action="worker-deploy" ${state.deploying ? 'disabled' : ''}>${state.deploying ? 'Разворачиваю…' : 'Развернуть'}</button></div>
               </div>`
             : ''
         }
@@ -941,6 +953,34 @@ async function paste() {
   document.getElementById('site-input')?.focus();
 }
 
+// deployWorker разворачивает воркер в Cloudflare по токену; токен не остаётся ни в окне, ни в FI.
+async function deployWorker() {
+  const token = (document.getElementById('cf-token-input')?.value ?? state.cfToken ?? '').trim();
+  const region = document.getElementById('cf-region')?.value ?? state.cfRegion ?? 'de';
+  if (!token) {
+    state.message = 'Вставьте токен Cloudflare';
+    render();
+    return;
+  }
+  state.deploying = true;
+  state.message = '';
+  state.notice = '';
+  render();
+  const data = await postJSON('/app/worker/deploy', { token, region });
+  state.deploying = false;
+  if (!data) state.message = 'Окно потеряло связь со своей частью на Go';
+  else if (data.error) state.message = data.error;
+  else {
+    if (data.status) state.status = data.status;
+    state.worker = null;
+    state.notice = `Воркер развёрнут: ${data.domain}. Сайты через воркер и Telegram уже идут через него.`;
+  }
+  state.cfToken = null; // токен больше не нужен — не держим его даже в памяти окна
+  const field = document.getElementById('cf-token-input');
+  if (field) field.value = '';
+  render();
+}
+
 async function loadAutostart() {
   const data = await postJSON('/app/autostart');
   state.autostart = typeof data?.enabled === 'boolean' ? data.enabled : null;
@@ -1073,6 +1113,9 @@ document.addEventListener('click', (event) => {
     case 'worker-recheck':
       command('recheck_worker');
       break;
+    case 'worker-deploy':
+      deployWorker();
+      break;
     case 'custom-add':
       fileAction('/app/strategy/import', (d) => (d.name ? `Стратегия «${d.name}» добавлена — её можно выбрать в списке или запустить подбор` : ''));
       break;
@@ -1183,8 +1226,12 @@ document.addEventListener('click', (event) => {
 
 document.addEventListener('submit', (event) => {
   const form = event.target.dataset.form;
-  if (form !== 'site' && form !== 'worker' && form !== 'via-worker') return;
+  if (form !== 'site' && form !== 'worker' && form !== 'via-worker' && form !== 'worker-deploy') return;
   event.preventDefault();
+  if (form === 'worker-deploy') {
+    deployWorker();
+    return;
+  }
   if (form === 'site') {
     addSite();
     return;
@@ -1209,6 +1256,10 @@ document.addEventListener('input', (event) => {
     state.viaWorker = event.target.value;
     return;
   }
+  if (event.target.id === 'cf-token-input') {
+    state.cfToken = event.target.value; // переживает перерисовку окна, пока воркер не развёрнут
+    return;
+  }
   if (event.target.id !== 'site-input') return;
   state.site.input = event.target.value;
   if (state.site.error) {
@@ -1230,6 +1281,10 @@ function schedule() {
 }
 
 document.addEventListener('change', (event) => {
+  if (event.target.id === 'cf-region') {
+    state.cfRegion = event.target.value;
+    return;
+  }
   if (event.target.id !== 'strategy-select') return;
   command('set_strategy', { name: event.target.value });
 });
