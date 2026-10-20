@@ -57,4 +57,6 @@ type Result struct {
 	Bytes      int64         `json:"bytes,omitempty"`
 	KBps       float64       `json:"kbps,omitempty"`
 	Duration   time.Duration `json:"duration"`
+	// SysDNSFailed — системный DNS не ответил, адрес взят из DoH.
+	SysDNSFailed bool `json:"sys_dns_failed,omitempty"`
 }

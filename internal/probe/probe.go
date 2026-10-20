@@ -93,6 +93,9 @@ func (p *Prober) attempt(ctx context.Context, t Target) Result {
 	}
 
 	r.IP = ip
+	// Адрес нашёлся только через DoH: проверка идёт дальше, но браузер, который спрашивает
+	// системный DNS, этот сайт не откроет — окно должно об этом сказать.
+	r.SysDNSFailed = dnsStatus == OK && dnsDetail != ""
 	switch t.Kind {
 	case KindQUIC:
 		p.checkQUIC(ctx, t, &r)

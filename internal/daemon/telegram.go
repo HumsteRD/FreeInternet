@@ -90,7 +90,7 @@ func (d *Daemon) telegramStatusLocked() TelegramStatus {
 		st.WorkerOutdated = d.workerVer > 0 && d.workerVer < tgproxy.WorkerVersionWeb
 		if len(d.cfg.ViaWorker) > 0 {
 			st.WorkerKeyOK = d.workerKeyOK
-			if d.web != nil && d.web.Listening() {
+			if d.cfg.ViaWorkerBrowsers && d.web != nil && d.web.Listening() {
 				st.SitesPAC = "http://" + miniAppsAddr(d.cfg.Telegram.Port) + tgproxy.SitesPACPath
 			}
 		}

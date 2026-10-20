@@ -328,10 +328,14 @@ function mainView(st) {
   const vpn = st.vpn
     ? `<section class="panel notice">${icon('globe', 16)}<span>Интернет идёт через VPN (${esc(st.vpn)}). Обход работает только для трафика мимо VPN, проверки и автоподбор на паузе, уведомлений не будет.</span></section>`
     : '';
+  const dns = st.dns_problem
+    ? `<section class="panel notice warn">${icon('globe', 16)}<span>DNS роутера или провайдера не отвечает — браузер может не открывать сайты (YouTube и другие), хотя проверки FI проходят: FI ищет адреса в обход него. <button class="btn sm" data-action="public-dns">Использовать публичный DNS</button></span></section>`
+    : '';
   const game = st.anti_cheat
     ? `<section class="panel notice">${icon('play', 16)}<span>Идёт игра с античитом ${esc(st.anti_cheat)}. Обход работает, но FI не перезапускает его до выхода из игры: иначе античит заблокирует драйвер до перезагрузки.</span></section>`
     : '';
   return `${heroView(st)}
+    ${dns}
     ${game}
     ${errorLine()}
     ${vpn}
@@ -690,6 +694,10 @@ function settingsView(st) {
           </div>
         </div>
         <div class="settings-row">
+          <span class="row-text"><span class="row-title-sm">Публичный DNS</span><span class="row-sub wrap">Адреса сайтов спрашивать у Cloudflare (1.1.1.1) и Яндекса (77.88.8.8), а не у роутера — если его DNS не отвечает. Выключите — DNS снова от роутера.</span></span>
+          <button class="toggle ${st.public_dns ? 'on' : ''}" role="switch" aria-checked="${Boolean(st.public_dns)}" aria-label="Публичный DNS" data-action="public-dns-toggle"></button>
+        </div>
+        <div class="settings-row">
           <span class="row-text"><span class="row-title-sm">Выключить QUIC в браузерах</span><span class="row-sub wrap">YouTube и сайты Google пойдут по TCP — обход держит его надёжнее, чем QUIC. Chrome, Edge, Brave и Яндекс покажут «управляется организацией» — это из-за этой настройки. Перезапустите браузер.</span></span>
           <button class="toggle ${st.browser_quic_off ? 'on' : ''}" role="switch" aria-checked="${Boolean(st.browser_quic_off)}" aria-label="Выключить QUIC в браузерах" data-action="quic-off"></button>
         </div>
@@ -802,7 +810,7 @@ function settingsView(st) {
 function viaWorkerSection(st) {
   const tg = st.telegram ?? {};
   const sites = st.via_worker ?? [];
-  let hint = 'Например, SoundCloud («Not available in Russian Federation»): обход DPI тут не поможет, сервис смотрит на страну. Сайт пойдёт через ваш Cloudflare Worker с не российского IP — в браузерах и в Telegram.';
+  let hint = 'Например, SoundCloud («Not available in Russian Federation»): обход DPI тут не поможет, сервис смотрит на страну. Сайт пойдёт через ваш Cloudflare Worker с не российского IP — в Telegram сразу, в браузерах — если включить ниже.';
   let warn = false;
   if (!tg.enabled) {
     hint = 'Нужен включённый прокси для Telegram: сайты через воркер работают вместе с ним.';
@@ -832,6 +840,10 @@ function viaWorkerSection(st) {
             <button class="btn sm" data-action="worker-copy">Скопировать код воркера</button>
             <button class="btn sm ghost" data-action="worker-recheck" ${!tg.worker ? 'disabled' : ''}>Проверить воркер</button>
           </div>
+        </div>
+        <div class="settings-row">
+          <span class="row-text"><span class="row-title-sm">Применять в браузерах</span><span class="row-sub wrap">FI поставит в Windows сценарий настройки прокси (Параметры → Сеть и Интернет → Прокси-сервер): через FI пойдут только сайты из списка, остальное — напрямую. Выключите здесь или уберите сценарий в Windows — FI его больше не поставит.</span></span>
+          <button class="toggle ${st.via_worker_browsers ? 'on' : ''}" role="switch" aria-checked="${Boolean(st.via_worker_browsers)}" aria-label="Применять в браузерах" data-action="via-worker-browsers" ${!sites.length ? 'disabled' : ''}></button>
         </div>
       </div>
     </section>`;
@@ -1116,11 +1128,20 @@ document.addEventListener('click', (event) => {
     case 'tg-shared-cf':
       command('set_telegram_shared_cf', { on: !state.status?.telegram?.shared_cf });
       break;
+    case 'public-dns':
+      command('set_public_dns', { on: true });
+      break;
+    case 'public-dns-toggle':
+      command('set_public_dns', { on: !state.status?.public_dns });
+      break;
     case 'quic-off':
       command('set_browser_quic_off', { on: !state.status?.browser_quic_off });
       break;
     case 'quic-auto':
       command('set_quic_auto', { on: !state.status?.quic_auto });
+      break;
+    case 'via-worker-browsers':
+      command('set_via_worker_browsers', { on: !state.status?.via_worker_browsers });
       break;
     case 'via-worker-remove':
       command('remove_via_worker', { host: el.dataset.host });

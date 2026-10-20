@@ -20,6 +20,8 @@ import (
 	"golang.org/x/sys/windows/registry"
 	"golang.org/x/sys/windows/svc/mgr"
 
+	"fi/internal/config"
+	"fi/internal/diag"
 	"fi/internal/winsvc"
 )
 
@@ -237,6 +239,9 @@ func runUninstall(quiet bool) error {
 	winsvc.SetTelegramPAC("")   // окна мини-приложений Telegram снова ходят напрямую
 	winsvc.RemoveSystemPAC()    // и браузеры — без PAC FI для сайтов через воркер
 	winsvc.SetBrowserQUIC(true) // и снова с QUIC, если FI его запрещал
+	if cfg, err := config.Load(filepath.Join(dataDir(), "config.json")); err == nil && cfg.PublicDNS {
+		diag.SetAdapterDNS(nil) // DNS снова от роутера, как было до FI
+	}
 	removeAutostart()
 	os.Remove(shortcutPath())
 	os.Remove(desktopPath())

@@ -27,3 +27,5 @@ func AntiCheat() string { return "" }
 func ResetWFP() error { return errUnsupported }
 
 func KillWinws() int { return 0 }
+
+func SetAdapterDNS([]string) error { return errUnsupported }

@@ -318,6 +318,25 @@ func AntiCheat() string {
 	return ""
 }
 
+// SetAdapterDNS задаёт DNS обычного адаптера (Ethernet, Wi-Fi), через который идёт интернет;
+// пустой список — снова от роутера по DHCP.
+func SetAdapterDNS(servers []string) error {
+	list, _, err := adapters()
+	if err != nil {
+		return err
+	}
+	a := physicalAdapter(list)
+	if a == nil {
+		return errors.New("не найден сетевой адаптер с выходом в интернет")
+	}
+	for _, args := range dnsCommands(a.Index, servers) {
+		if out, err := hiddenCommand("netsh", args...).CombinedOutput(); err != nil {
+			return fmt.Errorf("netsh %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
+		}
+	}
+	return nil
+}
+
 // ResetWFP перезапускает службу базовой фильтрации Windows (BFE) вместе с брандмауэром:
 // застрявшие после античита фильтры WinDivert сбрасываются без перезагрузки.
 func ResetWFP() error { return winsvc.RestartWithDependents("BFE") }

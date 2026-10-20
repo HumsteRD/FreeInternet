@@ -41,6 +41,17 @@ func SyncSystemPAC(base string) error {
 	return err
 }
 
+// CurrentPAC — сценарий настройки прокси, заданный в Windows сейчас.
+func CurrentPAC() string {
+	k, err := registry.OpenKey(registry.CURRENT_USER, internetSettingsKey, registry.QUERY_VALUE)
+	if err != nil {
+		return ""
+	}
+	defer k.Close()
+	v, _, _ := k.GetStringValue("AutoConfigURL")
+	return v
+}
+
 // RemoveSystemPAC убирает PAC FI — при удалении программы.
 func RemoveSystemPAC() error { return SyncSystemPAC("") }
 

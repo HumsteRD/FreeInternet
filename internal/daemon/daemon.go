@@ -63,31 +63,35 @@ type Task struct {
 
 // Status — всё, что нужно главному окну.
 type Status struct {
-	Enabled      bool            `json:"enabled"`
-	Running      bool            `json:"running"`
-	Strategy     string          `json:"strategy,omitempty"`
-	Strategies   int             `json:"strategies"`
-	StrategyList []string        `json:"strategy_list"` // что можно выбрать вручную
-	Custom       []string        `json:"custom_strategies"`
-	ViaWorker    []string        `json:"via_worker"` // сайты через воркер
-	GameMode     string          `json:"game_mode"`
-	Games        []string        `json:"games"`
-	GameList     []strategy.Game `json:"game_profiles"`
-	AutoFix      bool            `json:"auto_fix"`
-	Error        string          `json:"error,omitempty"`
-	Conflict     []string        `json:"conflict,omitempty"`    // другие обходы, из-за которых движок не запущен
-	VPN          string          `json:"vpn,omitempty"`         // интернет идёт через этот VPN: проверки видят его сеть
-	AntiCheat    string          `json:"anti_cheat,omitempty"`  // идёт игра с этим античитом: обход не перезапускается
-	QUICOff      bool            `json:"browser_quic_off"`      // FI запретил браузерам QUIC
-	QUICAuto     bool            `json:"quic_auto"`             // FI может запретить QUIC сам
-	SelectNote   string          `json:"select_note,omitempty"` // почему последний подбор прерван или что он исправил
-	Task         *Task           `json:"task,omitempty"`
-	Services     []Service       `json:"services"`
-	CheckedAt    time.Time       `json:"checked_at,omitzero"`
-	Sites        []config.Site   `json:"sites"`
-	Telegram     TelegramStatus  `json:"telegram"`
-	Base         BaseStatus      `json:"base"`
-	App          AppStatus       `json:"app"`
+	Enabled      bool     `json:"enabled"`
+	Running      bool     `json:"running"`
+	Strategy     string   `json:"strategy,omitempty"`
+	Strategies   int      `json:"strategies"`
+	StrategyList []string `json:"strategy_list"` // что можно выбрать вручную
+	Custom       []string `json:"custom_strategies"`
+	ViaWorker    []string `json:"via_worker"` // сайты через воркер
+	// ViaWorkerBrowsers — FI ставит в Windows сценарий прокси, чтобы сайты через воркер шли и в браузерах.
+	ViaWorkerBrowsers bool            `json:"via_worker_browsers"`
+	GameMode          string          `json:"game_mode"`
+	Games             []string        `json:"games"`
+	GameList          []strategy.Game `json:"game_profiles"`
+	AutoFix           bool            `json:"auto_fix"`
+	Error             string          `json:"error,omitempty"`
+	Conflict          []string        `json:"conflict,omitempty"`    // другие обходы, из-за которых движок не запущен
+	VPN               string          `json:"vpn,omitempty"`         // интернет идёт через этот VPN: проверки видят его сеть
+	AntiCheat         string          `json:"anti_cheat,omitempty"`  // идёт игра с этим античитом: обход не перезапускается
+	QUICOff           bool            `json:"browser_quic_off"`      // FI запретил браузерам QUIC
+	QUICAuto          bool            `json:"quic_auto"`             // FI может запретить QUIC сам
+	DNSProblem        bool            `json:"dns_problem"`           // системный DNS не отвечает
+	PublicDNS         bool            `json:"public_dns"`            // FI переключил адаптер на публичный DNS
+	SelectNote        string          `json:"select_note,omitempty"` // почему последний подбор прерван или что он исправил
+	Task              *Task           `json:"task,omitempty"`
+	Services          []Service       `json:"services"`
+	CheckedAt         time.Time       `json:"checked_at,omitzero"`
+	Sites             []config.Site   `json:"sites"`
+	Telegram          TelegramStatus  `json:"telegram"`
+	Base              BaseStatus      `json:"base"`
+	App               AppStatus       `json:"app"`
 }
 
 type Daemon struct {
@@ -128,6 +132,7 @@ type Daemon struct {
 	webErr      string
 	antiCheat   string // запущенный античит: пока он есть, обход не перезапускается
 	lastResults []probe.Result
+	dnsBroken   bool  // системный DNS не отвечает: браузер может не открывать сайты
 	quicFails   int   // проверок подряд, где не прошёл только QUIC
 	workerVer   int   // версия кода воркера; 0 — не знаем
 	workerKeyOK *bool // в воркере код с ключом FI; nil — не проверяли
@@ -246,26 +251,29 @@ func (d *Daemon) Status() Status {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	st := Status{
-		Enabled:      d.cfg.Enabled,
-		Running:      d.proc != nil,
-		Strategy:     d.cfg.Strategy,
-		Strategies:   len(d.strategies),
-		StrategyList: strategyNames(d.strategies),
-		Custom:       d.customNamesLocked(),
-		ViaWorker:    slices.Clone(d.cfg.ViaWorker),
-		GameMode:     d.cfg.GameMode,
-		Games:        slices.Clone(d.cfg.Games),
-		GameList:     strategy.Games,
-		AutoFix:      d.cfg.AutoFix,
-		Services:     slices.Clone(d.services),
-		Conflict:     slices.Clone(d.conflict),
-		VPN:          vpn,
-		AntiCheat:    d.antiCheat,
-		QUICOff:      d.cfg.BrowserQUICOff,
-		QUICAuto:     d.cfg.QUICAuto,
-		SelectNote:   d.selectNote,
-		CheckedAt:    d.checkedAt,
-		Sites:        slices.Clone(d.cfg.Sites),
+		Enabled:           d.cfg.Enabled,
+		Running:           d.proc != nil,
+		Strategy:          d.cfg.Strategy,
+		Strategies:        len(d.strategies),
+		StrategyList:      strategyNames(d.strategies),
+		Custom:            d.customNamesLocked(),
+		ViaWorker:         slices.Clone(d.cfg.ViaWorker),
+		ViaWorkerBrowsers: d.cfg.ViaWorkerBrowsers,
+		GameMode:          d.cfg.GameMode,
+		Games:             slices.Clone(d.cfg.Games),
+		GameList:          strategy.Games,
+		AutoFix:           d.cfg.AutoFix,
+		Services:          slices.Clone(d.services),
+		Conflict:          slices.Clone(d.conflict),
+		VPN:               vpn,
+		AntiCheat:         d.antiCheat,
+		QUICOff:           d.cfg.BrowserQUICOff,
+		QUICAuto:          d.cfg.QUICAuto,
+		DNSProblem:        d.dnsBroken,
+		PublicDNS:         d.cfg.PublicDNS,
+		SelectNote:        d.selectNote,
+		CheckedAt:         d.checkedAt,
+		Sites:             slices.Clone(d.cfg.Sites),
 	}
 	if d.task != nil {
 		task := *d.task
@@ -795,6 +803,9 @@ func (d *Daemon) check(ctx context.Context) ([]Service, error) {
 	services := summarize(results)
 
 	d.noteVPN(vpn)
+	if vpn == "" { // через VPN DNS отвечает VPN-клиент — о роутере судить нельзя
+		d.noteDNS(results)
+	}
 	d.mu.Lock()
 	d.lastResults = results
 	prev := d.services

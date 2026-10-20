@@ -80,6 +80,15 @@ func (d *Daemon) RemoveViaWorker(host string) error {
 	return err
 }
 
+// SetViaWorkerBrowsers включает или выключает сайты через воркер в браузерах (системный
+// сценарий настройки прокси Windows, его ставит окно FI).
+func (d *Daemon) SetViaWorkerBrowsers(on bool) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.cfg.ViaWorkerBrowsers = on
+	return d.saveLocked()
+}
+
 // WorkerCode — код воркера с ключом этого FI.
 func (d *Daemon) WorkerCode() string {
 	d.mu.Lock()

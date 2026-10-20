@@ -76,6 +76,9 @@ func openInClient(path, link string) error {
 type traySettings struct {
 	TelegramClient string `json:"telegram_client,omitempty"` // чем открывать ссылку прокси
 	Theme          string `json:"theme,omitempty"`           // тема окна: dark, gray, light
+	// SitesPACSet — FI поставил в Windows сценарий прокси для сайтов через воркер. Если сценария
+	// не стало, его убрал человек — возвращать нельзя.
+	SitesPACSet bool `json:"sites_pac_set,omitempty"`
 }
 
 func traySettingsPath() string {

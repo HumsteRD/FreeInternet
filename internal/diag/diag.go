@@ -182,6 +182,19 @@ func vpnAdapter(list []Adapter, internetIf uint32) *Adapter {
 	return nil
 }
 
+// dnsCommands — команды netsh, которые задают DNS адаптеру ifIndex; без серверов — DNS по DHCP.
+func dnsCommands(ifIndex uint32, servers []string) [][]string {
+	name := "name=" + strconv.FormatUint(uint64(ifIndex), 10)
+	if len(servers) == 0 {
+		return [][]string{{"interface", "ipv4", "set", "dnsservers", name, "source=dhcp"}}
+	}
+	cmds := [][]string{{"interface", "ipv4", "set", "dnsservers", name, "source=static", "address=" + servers[0], "register=primary", "validate=no"}}
+	for i, s := range servers[1:] {
+		cmds = append(cmds, []string{"interface", "ipv4", "add", "dnsservers", name, "address=" + s, "index=" + strconv.Itoa(i+2), "validate=no"})
+	}
+	return cmds
+}
+
 // physicalAdapter — адаптер, через который в интернет выходит сам VPN (Ethernet, Wi-Fi): со шлюзом,
 // не похожий на VPN, с наименьшей метрикой. nil — такого нет.
 func physicalAdapter(list []Adapter) *Adapter {

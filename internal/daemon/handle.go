@@ -112,6 +112,10 @@ func (d *Daemon) Handle(ctx context.Context, method string, params json.RawMessa
 		if err = decode(params, &on); err == nil {
 			err = d.SetBrowserQUICOff(on.On)
 		}
+	case "set_public_dns":
+		if err = decode(params, &on); err == nil {
+			err = d.SetPublicDNS(on.On)
+		}
 	case "set_quic_auto":
 		if err = decode(params, &on); err == nil {
 			err = d.SetQUICAuto(on.On)
@@ -123,6 +127,10 @@ func (d *Daemon) Handle(ctx context.Context, method string, params json.RawMessa
 	case "remove_via_worker":
 		if err = decode(params, &host); err == nil {
 			err = d.RemoveViaWorker(host.Host)
+		}
+	case "set_via_worker_browsers":
+		if err = decode(params, &on); err == nil {
+			err = d.SetViaWorkerBrowsers(on.On)
 		}
 	case "worker_code":
 		return map[string]string{"code": d.WorkerCode()}, nil

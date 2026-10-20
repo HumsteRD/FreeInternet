@@ -58,10 +58,15 @@ type Config struct {
 	// ViaWorker — сайты, которые идут через Cloudflare Worker: их закрыли для России сами
 	// сервисы («Not available in your country»), и нужен не российский IP.
 	ViaWorker []string `json:"via_worker,omitempty"`
+	// ViaWorkerBrowsers — пускать сайты через воркер и в браузерах: для этого FI ставит в Windows
+	// сценарий настройки прокси. Только по явному согласию: это видно в параметрах Windows.
+	ViaWorkerBrowsers bool `json:"via_worker_browsers,omitempty"`
 	// BrowserQUICOff — FI запретил браузерам QUIC (YouTube идёт по TCP); QUICAuto — FI может
 	// сделать это сам, когда QUIC у YouTube не проходит, а стратегии этого не лечат.
 	BrowserQUICOff bool `json:"browser_quic_off,omitempty"`
 	QUICAuto       bool `json:"quic_auto"`
+	// PublicDNS — FI переключил обычный адаптер на публичный DNS, потому что DNS роутера молчал.
+	PublicDNS bool `json:"public_dns,omitempty"`
 }
 
 // Telegram — встроенный прокси для Telegram Desktop.
