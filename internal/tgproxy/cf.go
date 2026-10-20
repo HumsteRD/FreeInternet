@@ -25,7 +25,6 @@ const CFDomainsURL = "https://raw.githubusercontent.com/Flowseal/tg-ws-proxy/mai
 const (
 	minCFDomains = 3 // меньше доменов в ответе — список испорчен, прежний лучше
 	cfTries      = 4 // сколько доменов пробовать за одно соединение, если сеть лежит
-	cfPreferFor  = 30 * time.Minute
 )
 
 // errNoCF — общих доменов нет или путь не подходит (тестовые дата-центры).
@@ -199,22 +198,4 @@ func (s *Server) dialHost(ctx context.Context, host, path string) (*wsConn, erro
 		}
 	}
 	return nil, err
-}
-
-// preferCF сообщает, что прямой путь недавно не прошёл, а Cloudflare сработал: пока это так,
-// первым пробуем Cloudflare и не ждём таймаутов прямого.
-func (s *Server) preferCF() bool {
-	s.cfMu.Lock()
-	defer s.cfMu.Unlock()
-	return time.Now().Before(s.cfPreferUntil)
-}
-
-func (s *Server) setPreferCF(on bool) {
-	s.cfMu.Lock()
-	defer s.cfMu.Unlock()
-	if on {
-		s.cfPreferUntil = time.Now().Add(cfPreferFor)
-	} else {
-		s.cfPreferUntil = time.Time{}
-	}
 }

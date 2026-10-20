@@ -108,6 +108,14 @@ func (d *Daemon) Handle(ctx context.Context, method string, params json.RawMessa
 		if err = decode(params, &p); err == nil {
 			err = d.RemoveCustomStrategy(p.Name)
 		}
+	case "set_browser_quic_off":
+		if err = decode(params, &on); err == nil {
+			err = d.SetBrowserQUICOff(on.On)
+		}
+	case "set_quic_auto":
+		if err = decode(params, &on); err == nil {
+			err = d.SetQUICAuto(on.On)
+		}
 	case "add_via_worker":
 		if err = decode(params, &host); err == nil {
 			err = d.AddViaWorker(host.Host)

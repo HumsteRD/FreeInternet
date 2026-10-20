@@ -31,7 +31,7 @@ func New() *Prober {
 		StallTimeout:   5 * time.Second,
 		MaxBytes:       256 << 10,
 		SlowKBps:       100,
-		Parallel:       8,
+		Parallel:       16, // цели — разные серверы; больше параллельных проверок — быстрее подбор
 		Retries:        1,
 	}
 }

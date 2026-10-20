@@ -35,14 +35,16 @@ var (
 )
 
 const (
-	maxRestarts       = 3
-	restartWindow     = 10 * time.Minute
-	restartDelay      = 5 * time.Second
-	autoSelectPause   = time.Hour       // автоподбор не чаще: он на несколько минут прерывает интернет
-	retryDelay        = 5 * time.Second // пауза перед повторной проверкой упавших целей
-	confirmDelay      = time.Minute     // через сколько подтверждать поломку перед автоподбором
-	recheckOffline    = 2 * time.Minute // когда нет связи, следующая проверка скорее обычной
-	quietAfterUseless = 6 * time.Hour   // пауза автоподбора, если быстрый подбор не нашёл ничего лучше
+	maxRestarts   = 3
+	restartWindow = 10 * time.Minute
+	restartDelay  = 5 * time.Second
+	// Сроки подобраны так, чтобы от поломки до починки проходило не больше ~5 минут: проверка
+	// раз в 3 минуты, подтверждение через 20 секунд, быстрый подбор — около минуты.
+	autoSelectPause   = 10 * time.Minute // автоподбор не чаще: каждый на минуту прерывает интернет
+	retryDelay        = 3 * time.Second  // пауза перед повторной проверкой упавших целей
+	confirmDelay      = 20 * time.Second // через сколько подтверждать поломку перед автоподбором
+	recheckOffline    = time.Minute      // когда нет связи, следующая проверка скорее обычной
+	quietAfterUseless = 20 * time.Minute // пауза автоподбора, если быстрый подбор не нашёл ничего лучше
 )
 
 // vpnPoll — как часто смотреть, не включился ли VPN: движок надо сразу убрать с адаптера VPN,
@@ -75,6 +77,9 @@ type Status struct {
 	Error        string          `json:"error,omitempty"`
 	Conflict     []string        `json:"conflict,omitempty"`    // другие обходы, из-за которых движок не запущен
 	VPN          string          `json:"vpn,omitempty"`         // интернет идёт через этот VPN: проверки видят его сеть
+	AntiCheat    string          `json:"anti_cheat,omitempty"`  // идёт игра с этим античитом: обход не перезапускается
+	QUICOff      bool            `json:"browser_quic_off"`      // FI запретил браузерам QUIC
+	QUICAuto     bool            `json:"quic_auto"`             // FI может запретить QUIC сам
 	SelectNote   string          `json:"select_note,omitempty"` // почему последний подбор прерван или что он исправил
 	Task         *Task           `json:"task,omitempty"`
 	Services     []Service       `json:"services"`
@@ -121,8 +126,13 @@ type Daemon struct {
 	web         *tgproxy.WebProxy
 	webDone     chan struct{}
 	webErr      string
+	antiCheat   string // запущенный античит: пока он есть, обход не перезапускается
+	lastResults []probe.Result
+	quicFails   int   // проверок подряд, где не прошёл только QUIC
 	workerVer   int   // версия кода воркера; 0 — не знаем
 	workerKeyOK *bool // в воркере код с ключом FI; nil — не проверяли
+	// workerRetries — сколько раз подряд воркер не ответил при проверке версии.
+	workerRetries int
 
 	http          *http.Client
 	base          manifest // установленный набор
@@ -250,6 +260,9 @@ func (d *Daemon) Status() Status {
 		Services:     slices.Clone(d.services),
 		Conflict:     slices.Clone(d.conflict),
 		VPN:          vpn,
+		AntiCheat:    d.antiCheat,
+		QUICOff:      d.cfg.BrowserQUICOff,
+		QUICAuto:     d.cfg.QUICAuto,
 		SelectNote:   d.selectNote,
 		CheckedAt:    d.checkedAt,
 		Sites:        slices.Clone(d.cfg.Sites),
@@ -297,6 +310,9 @@ func (d *Daemon) SetGameMode(mode string) error {
 	if !slices.Contains([]string{"off", "games", "tcp", "udp", "all"}, mode) {
 		return fmt.Errorf("неизвестный игровой режим %q", mode)
 	}
+	if err := restartAllowed(); err != nil {
+		return err
+	}
 	d.mu.Lock()
 	if d.task != nil && d.task.Kind == "select" {
 		d.mu.Unlock()
@@ -323,6 +339,9 @@ func strategyNames(list []strategy.Strategy) []string {
 
 // SetStrategy ставит выбранную вручную стратегию и перезапускает движок.
 func (d *Daemon) SetStrategy(name string) error {
+	if err := restartAllowed(); err != nil {
+		return err
+	}
 	d.mu.Lock()
 	if d.task != nil && d.task.Kind == "select" {
 		d.mu.Unlock()
@@ -442,11 +461,25 @@ func (d *Daemon) watchVPN(ctx context.Context) {
 	defer tick.Stop()
 	last, _ := netRoute()
 	pending, seen := last, 0
+	lastAC := ""
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-tick.C:
+		}
+		// Игра с античитом: обход держим как есть, перезапуски — после неё.
+		if ac := antiCheat(); ac != lastAC {
+			d.mu.Lock()
+			d.antiCheat = ac
+			d.mu.Unlock()
+			if ac != "" {
+				d.log.Info("запущена игра с античитом — обход работает, но не перезапускается до выхода из неё", "anticheat", ac)
+			} else {
+				d.log.Info("игра с античитом закрыта", "anticheat", lastAC)
+				d.afterGame()
+			}
+			lastAC = ac
 		}
 		vpn, physical := netRoute()
 		changed := vpn != last
@@ -462,7 +495,7 @@ func (d *Daemon) watchVPN(ctx context.Context) {
 
 		want := ifaceFor(vpn, physical)
 		d.mu.Lock()
-		restart := d.proc != nil && d.engineIf != want
+		restart := d.proc != nil && d.engineIf != want && lastAC == "" // во время игры — после неё
 		d.mu.Unlock()
 		if restart {
 			if want != 0 {
@@ -478,6 +511,20 @@ func (d *Daemon) watchVPN(ctx context.Context) {
 		if changed {
 			d.networkChanged(vpn)
 		}
+	}
+}
+
+// afterGame — игра с античитом закрылась: если обход за это время упал, поднимаем его сразу,
+// а не через несколько минут, и со всем лечением драйвера.
+func (d *Daemon) afterGame() {
+	d.mu.Lock()
+	down := d.cfg.Enabled && d.proc == nil && d.task == nil && d.baseErr == nil && d.cfg.Strategy != ""
+	d.mu.Unlock()
+	if !down {
+		return
+	}
+	if err := d.startEngine(); err != nil {
+		d.log.Warn("обход после игры не запущен", "err", err)
 	}
 }
 
@@ -501,31 +548,78 @@ func (d *Daemon) networkChanged(vpn string) {
 // startWinws запускает winws. Если не открылся драйвер WinDivert — обычно он завис после
 // прошлого запуска, — драйвер выгружается и winws запускается ещё раз: без этого обход
 // не заработал бы до перезагрузки.
+//
+// Если драйвер застрял в фильтрах Windows (FWP_E_IN_USE — так бывает после игры с античитом),
+// лечение идёт по шагам, от мягкого к жёсткому: закрыть оставшиеся процессы winws, выгрузить
+// драйвер, перезапустить службу базовой фильтрации Windows. Перезагрузка — только если не
+// помогло и это. Пока античит загружен, лечить бесполезно — ждём выхода из игры.
 func (d *Daemon) startWinws(exe string, args []string) (*engine.Process, error) {
 	proc, err := engine.Start(context.Background(), exe, args)
 	var re *engine.RunError
 	if err == nil || !errors.As(err, &re) || !re.WinDivert() {
 		return proc, err
 	}
+	if ac := antiCheat(); ac != "" {
+		d.log.Warn("драйвер WinDivert не открылся, пока загружен античит — дождусь выхода из игры", "anticheat", ac, "reason", re.Reason())
+		return nil, err
+	}
 	d.log.Warn("драйвер WinDivert не открылся — выгружаю его и запускаю снова", "reason", re.Reason(), "output", re.Output)
+	if n := killWinws(); n > 0 {
+		d.log.Info("закрыты оставшиеся процессы winws", "count", n)
+	}
 	if uerr := healWinDivert(); uerr != nil {
 		d.log.Warn("драйвер WinDivert не выгружен", "err", uerr)
-		return nil, err
 	}
 	proc, err = engine.Start(context.Background(), exe, args)
 	if err == nil {
 		d.log.Info("драйвер WinDivert перезапущен, обход работает")
+		return proc, nil
+	}
+	if !errors.As(err, &re) || !re.WFPInUse() {
+		return nil, err
+	}
+	d.log.Warn("фильтры WinDivert застряли в Windows — перезапускаю службу базовой фильтрации (BFE)")
+	if rerr := resetWFP(); rerr != nil {
+		d.log.Warn("служба базовой фильтрации перезапущена не полностью", "err", rerr)
+	}
+	healWinDivert()
+	proc, err = engine.Start(context.Background(), exe, args)
+	if err == nil {
+		d.log.Info("фильтры Windows сброшены без перезагрузки, обход работает")
 	}
 	return proc, err
 }
 
-// healWinDivert выгружает драйвер WinDivert, если его не держит другой обход.
-var healWinDivert = diag.UnloadWinDivert
+// Подмены для тестов.
+var (
+	// healWinDivert выгружает драйвер WinDivert, если его не держит другой обход.
+	healWinDivert = diag.UnloadWinDivert
+	// antiCheat — загруженный античит; пока он есть, обход нельзя перезапускать.
+	antiCheat = diag.AntiCheat
+	resetWFP  = diag.ResetWFP
+	killWinws = diag.KillWinws
+)
+
+// errAntiCheat — отказ перезапустить обход, пока идёт игра с античитом.
+func errAntiCheat(ac string) error {
+	return fmt.Errorf("запущена игра с античитом %s: перезапуск обхода сейчас сломал бы драйвер WinDivert до перезагрузки. Повторите после выхода из игры", ac)
+}
+
+// restartAllowed — можно ли сейчас перезапускать обход (подбор, смена стратегии, переход на VPN).
+func restartAllowed() error {
+	if ac := antiCheat(); ac != "" {
+		return errAntiCheat(ac)
+	}
+	return nil
+}
 
 // engineErrorText — ошибка движка для окна: коротко и с тем, что делать.
 func engineErrorText(err error) string {
 	var re *engine.RunError
-	if errors.As(err, &re) && re.WinDivert() {
+	switch {
+	case errors.As(err, &re) && re.WinDivert() && antiCheat() != "":
+		return "Драйвер WinDivert занят античитом (" + antiCheat() + "). Выйдите из игры — FI сам запустит обход снова, перезагрузка не нужна."
+	case errors.As(err, &re) && re.WinDivert():
 		return "Драйвер WinDivert не запускается, и перезапустить его не удалось — перезагрузите компьютер. Причина: " + re.Reason()
 	}
 	return err.Error()
@@ -667,6 +761,9 @@ func (d *Daemon) check(ctx context.Context) ([]Service, error) {
 	d.mu.Lock()
 	srv := d.tg
 	targets := probe.WithYouTubeNode(checkTargets(d.cfg.MainSites(), srv != nil), node)
+	if d.cfg.BrowserQUICOff {
+		targets = dropQUIC(targets)
+	}
 	d.mu.Unlock()
 
 	var tgResult probe.Result
@@ -699,6 +796,7 @@ func (d *Daemon) check(ctx context.Context) ([]Service, error) {
 
 	d.noteVPN(vpn)
 	d.mu.Lock()
+	d.lastResults = results
 	prev := d.services
 	d.services, d.checkedAt = services, time.Now()
 	d.mu.Unlock()
@@ -838,6 +936,7 @@ func (d *Daemon) periodicCheck(ctx context.Context) (soon bool) {
 		}
 		return false
 	}
+	quicOnlyNow := d.noteQUIC(d.results()) // считает проверки подряд, где не прошёл только QUIC
 	switch {
 	case offline(services):
 		// Не открывается даже контрольный сайт. Интернет мог пропасть, а могла сломать его
@@ -851,13 +950,17 @@ func (d *Daemon) periodicCheck(ctx context.Context) (soon bool) {
 	}
 	// Сначала убеждаемся, что поломка не случайная: окно уведомляет только о подтверждённой,
 	// а подбор на минуту прерывает интернет.
-	d.log.Info("похоже, сервис перестал работать — перепроверю через минуту")
+	d.log.Info("похоже, сервис перестал работать — перепроверю", "через", confirmDelay, "только_quic", quicOnlyNow)
 	if !d.sleep(ctx, confirmDelay) {
 		return false
 	}
 	services, err = d.Check(ctx)
 	switch {
 	case err != nil:
+		return false
+	case d.noteQUIC(d.results()):
+		// Не проходит только QUIC: подбор его не лечит, а связь рвёт. FI выключил QUIC в браузерах
+		// (если это ему разрешено) — YouTube пойдёт по TCP.
 		return false
 	case !broke(prev, services):
 		d.log.Info("сбой был временным")
@@ -947,6 +1050,11 @@ func (d *Daemon) startSelect(quick bool) error {
 	if vpn := diag.InternetVPN(); vpn != "" {
 		return fmt.Errorf("%w (%s): через него все стратегии выглядят рабочими, и подбор выбрал бы наугад. Выключите VPN и запустите подбор снова", errVPN, vpn)
 	}
+	// Подбор перезапускает winws на каждой стратегии, а при загруженном античите WinDivert
+	// после этого не регистрируется до перезагрузки.
+	if err := restartAllowed(); err != nil {
+		return err
+	}
 	task := &Task{Kind: "select", Title: "Подбор стратегии"}
 	if !d.beginTask(task) && !(d.preemptCheck() && d.beginTask(task)) {
 		return ErrBusy
@@ -973,9 +1081,11 @@ func (d *Daemon) startSelect(quick bool) error {
 		GameMode: d.cfg.GameMode,
 		Games:    d.cfg.Games,
 		Ipset:    d.cfg.Ipset,
-		Targets:  selectTargets(d.cfg.MainSites()),
+		Targets:  d.selectTargetsLocked(),
 		Prober:   d.prober,
 		Heal:     healWinDivert,
+		// Подбор не дольше нужного: первая стратегия, прошедшая все проверки, и есть лучшая.
+		StopWhenPerfect: true,
 		OnStart: func(i, total int, name string) {
 			d.progress(i, total, name)
 			if vpn := diag.InternetVPN(); vpn != "" && ctx.Err() == nil {

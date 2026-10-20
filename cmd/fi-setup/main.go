@@ -234,8 +234,9 @@ func runUninstall(quiet bool) error {
 		return fmt.Errorf("служба: %w", err)
 	}
 	winsvc.KillProcesses("fi.exe", 0)
-	winsvc.SetTelegramPAC("") // окна мини-приложений Telegram снова ходят напрямую
-	winsvc.RemoveSystemPAC()  // и браузеры — без PAC FI для сайтов через воркер
+	winsvc.SetTelegramPAC("")   // окна мини-приложений Telegram снова ходят напрямую
+	winsvc.RemoveSystemPAC()    // и браузеры — без PAC FI для сайтов через воркер
+	winsvc.SetBrowserQUIC(true) // и снова с QUIC, если FI его запрещал
 	removeAutostart()
 	os.Remove(shortcutPath())
 	os.Remove(desktopPath())

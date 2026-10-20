@@ -90,10 +90,13 @@ func idleOf(p *pool, k poolKey) []*fakeUp {
 
 func TestPool(t *testing.T) {
 	d := &fakeDialer{}
-	p := newPool(2, d.dial)
+	p := newPool(1, d.dial) // для файлов пул вдвое больше: 2 соединения
 	defer p.close()
 	k := poolKey{dc: 2, media: true}
 	full := func() bool { return p.ready() == 2 }
+	if p.sizeFor(k) != 2 || p.sizeFor(poolKey{dc: 2}) != 1 {
+		t.Fatal("пул для файлов должен быть вдвое больше основного")
+	}
 
 	if p.take(k) != nil {
 		t.Fatal("пустой пул выдал соединение")
@@ -183,7 +186,7 @@ func TestProxyUsesPool(t *testing.T) {
 	waitFor(t, "прокси запущен", func() bool { return srv.Stats().Listening })
 
 	for i := range 2 {
-		up, err := srv.connect(ctx, 2, false, false)
+		up, _, err := srv.connect(ctx, 2, false, false)
 		if err != nil {
 			t.Fatal(err)
 		}

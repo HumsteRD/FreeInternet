@@ -58,6 +58,10 @@ type Config struct {
 	// ViaWorker — сайты, которые идут через Cloudflare Worker: их закрыли для России сами
 	// сервисы («Not available in your country»), и нужен не российский IP.
 	ViaWorker []string `json:"via_worker,omitempty"`
+	// BrowserQUICOff — FI запретил браузерам QUIC (YouTube идёт по TCP); QUICAuto — FI может
+	// сделать это сам, когда QUIC у YouTube не проходит, а стратегии этого не лечат.
+	BrowserQUICOff bool `json:"browser_quic_off,omitempty"`
+	QUICAuto       bool `json:"quic_auto"`
 }
 
 // Telegram — встроенный прокси для Telegram Desktop.
@@ -77,6 +81,13 @@ type Telegram struct {
 	WorkerKey string `json:"worker_key,omitempty"`
 }
 
+// DefaultCheckEvery — как часто проверять сервисы. Раньше было 15 минут, и поломка YouTube
+// могла ждать починки полчаса; проверка лёгкая, раз в 3 минуты её не видно.
+const DefaultCheckEvery = 3 * time.Minute
+
+// oldCheckEvery — прежнее значение по умолчанию: такие настройки переводятся на новое.
+const oldCheckEvery = 15 * time.Minute
+
 func Default() Config {
 	return Config{
 		Enabled:    true,
@@ -85,7 +96,8 @@ func Default() Config {
 		AutoFix:    true,
 		AutoUpdate: true,
 		AppUpdate:  true,
-		CheckEvery: Duration(15 * time.Minute),
+		CheckEvery: Duration(DefaultCheckEvery),
+		QUICAuto:   true,
 		// Порт не 1443, чтобы не спорить с TgWsProxy, если он ещё установлен.
 		Telegram: Telegram{Enabled: true, Port: 1453, SharedCF: true},
 	}
@@ -109,6 +121,9 @@ func Load(path string) (Config, error) {
 			err = errors.Join(err, werr)
 		}
 		return Default(), fmt.Errorf("%s (копия — %s.bad): %w", path, path, err)
+	}
+	if time.Duration(c.CheckEvery) == oldCheckEvery {
+		c.CheckEvery = Duration(DefaultCheckEvery)
 	}
 	return c, nil
 }

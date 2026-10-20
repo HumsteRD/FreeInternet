@@ -215,7 +215,9 @@ type status struct {
 	Telegram struct {
 		SitesPAC string `json:"sites_pac"`
 	} `json:"telegram"`
-	Task *struct {
+	AntiCheat string `json:"anti_cheat"`
+	QUICOff   bool   `json:"browser_quic_off"`
+	Task      *struct {
 		Kind string `json:"kind"`
 	} `json:"task"`
 	Services []serviceInfo `json:"services"`
@@ -352,6 +354,12 @@ func (t *tray) notifyChanges(prev, cur *status) {
 	}
 	if prev.Base.Version != "" && cur.Base.Version != "" && prev.Base.Version != cur.Base.Version {
 		t.notify("Набор стратегий обновлён", "Версия "+cur.Base.Version+". Выбранная стратегия сохранена, если она осталась в наборе.")
+	}
+	if cur.QUICOff && !prev.QUICOff {
+		t.notify("QUIC в браузерах выключен", "YouTube пойдёт по TCP, который обход держит надёжнее. Перезапустите браузер.")
+	}
+	if cur.AntiCheat != "" && prev.AntiCheat == "" {
+		t.notify("Игра с античитом "+cur.AntiCheat, "Обход работает, но FI не будет перезапускать его до выхода из игры.")
 	}
 	if cur.App.UpdateAvailable && !cur.App.Configured && cur.App.Latest != prev.App.Latest {
 		t.notify("Вышла FI "+cur.App.Latest, "Откройте FI → Настройки, чтобы скачать новую версию.")

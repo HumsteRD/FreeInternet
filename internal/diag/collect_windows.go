@@ -296,6 +296,35 @@ func hiddenCommand(name string, args ...string) *exec.Cmd {
 	return cmd
 }
 
+// antiCheats — службы и драйверы античитов. Пока они загружены, обход можно держать, но
+// перезапускать нельзя: WinDivert не регистрируется заново (FWP_E_IN_USE) до перезагрузки.
+// Они загружаются только на время игры (Rust, Fortnite, Apex — EasyAntiCheat; PUBG, DayZ — BattlEye).
+var antiCheats = []struct{ service, title string }{
+	{"EasyAntiCheat_EOSSys", "EasyAntiCheat"},
+	{"EasyAntiCheatSys", "EasyAntiCheat"},
+	{"EasyAntiCheat_EOS", "EasyAntiCheat"},
+	{"EasyAntiCheat", "EasyAntiCheat"},
+	{"BEDaisy", "BattlEye"},
+	{"BEService", "BattlEye"},
+}
+
+// AntiCheat — запущенный античит, при котором нельзя перезапускать обход; пусто — нет.
+func AntiCheat() string {
+	for _, a := range antiCheats {
+		if winsvc.Running(a.service) {
+			return a.title
+		}
+	}
+	return ""
+}
+
+// ResetWFP перезапускает службу базовой фильтрации Windows (BFE) вместе с брандмауэром:
+// застрявшие после античита фильтры WinDivert сбрасываются без перезагрузки.
+func ResetWFP() error { return winsvc.RestartWithDependents("BFE") }
+
+// KillWinws закрывает процессы winws.exe — например, оставшиеся от прервавшегося подбора.
+func KillWinws() int { return winsvc.KillProcesses("winws.exe", 0) }
+
 // InternetVPN — VPN-адаптер, через который сейчас идёт интернет; пусто — напрямую или узнать не удалось.
 func InternetVPN() string {
 	list, index, err := adapters()

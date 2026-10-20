@@ -19,7 +19,7 @@ func TestNetworkChangedDropsOldPath(t *testing.T) {
 	s.track(active, true)
 	s.dnsCache = map[string]dnsEntry{"kws2.web.telegram.org": {ips: []string{"198.18.0.5"}, at: time.Now()}}
 	s.markFailed("kws2.web.telegram.org@149.154.167.99")
-	s.setPreferCF(true)
+	s.setPreferred("cf")
 
 	s.NetworkChanged()
 
@@ -31,7 +31,7 @@ func TestNetworkChangedDropsOldPath(t *testing.T) {
 	if !active.closed.Load() {
 		t.Fatal("активное соединение не закрыто — Telegram ждал бы его таймаута")
 	}
-	if s.dnsCache != nil || s.coolingDown("kws2.web.telegram.org@149.154.167.99") || s.preferCF() {
+	if s.dnsCache != nil || s.coolingDown("kws2.web.telegram.org@149.154.167.99") || s.preferred() != "" {
 		t.Fatal("адреса и паузы прежней сети не забыты")
 	}
 	waitFor(t, "пул открыл новые соединения", func() bool { return p.ready() == 2 && len(d.all()) == 4 })

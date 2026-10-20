@@ -30,6 +30,9 @@ type Options struct {
 	OnRun func(i, total int, run selector.Run)
 	// Heal выгружает зависший драйвер WinDivert, чтобы winws можно было запустить снова.
 	Heal func() error
+	// StopWhenPerfect — закончить, как только стратегия прошла все проверки: лучше уже не будет,
+	// а каждый следующий прогон — ещё десяток секунд без обхода.
+	StopWhenPerfect bool
 }
 
 // Run делает прогон без обхода и прогоны стратегий; при отмене ctx возвращает то, что успел.
@@ -77,8 +80,17 @@ func Run(ctx context.Context, o Options, strategies []strategy.Strategy) ([]sele
 		run := measure(ctx, o, exe, s.Name, s.Expand(vars))
 		runs = append(runs, run)
 		o.done(i+1, total, run)
+		if o.StopWhenPerfect && perfect(run) {
+			break
+		}
 	}
 	return runs, nil
+}
+
+// perfect — стратегия запустилась и все цели открылись без замедления.
+func perfect(r selector.Run) bool {
+	score, max, _ := r.Total()
+	return r.Error == "" && max > 0 && score >= max
 }
 
 func measure(ctx context.Context, o Options, exe, name string, args []string) selector.Run {

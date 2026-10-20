@@ -55,6 +55,9 @@ func (d *Daemon) CheckBaseUpdate(ctx context.Context) error {
 
 // StartBaseUpdate скачивает и устанавливает последний набор стратегий в фоне; ход виден в Status().Task.
 func (d *Daemon) StartBaseUpdate() error {
+	if err := restartAllowed(); err != nil { // установка набора перезапускает winws
+		return err
+	}
 	if !d.beginTask(&Task{Kind: "base", Title: "Обновление набора стратегий", Total: 3}) {
 		return ErrBusy
 	}

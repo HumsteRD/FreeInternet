@@ -131,8 +131,17 @@ func (p *pool) use(k poolKey) {
 	p.fillLocked(k, e)
 }
 
+// sizeFor — сколько готовых соединений держать: для файлов вдвое больше — Telegram открывает
+// по соединению на каждую загрузку, и картинки в ленте грузятся пачкой.
+func (p *pool) sizeFor(k poolKey) int {
+	if k.media {
+		return p.size * 2
+	}
+	return p.size
+}
+
 func (p *pool) fillLocked(k poolKey, e *poolEntry) {
-	if e.filling || len(e.idle) >= p.size {
+	if e.filling || len(e.idle) >= p.sizeFor(k) {
 		return
 	}
 	e.filling = true
@@ -146,7 +155,7 @@ func (p *pool) fill(k poolKey, e *poolEntry) {
 	defer p.wg.Done()
 	for {
 		p.mu.Lock()
-		if p.closed || p.entries[k] != e || len(e.idle) >= p.size {
+		if p.closed || p.entries[k] != e || len(e.idle) >= p.sizeFor(k) {
 			e.filling = false
 			p.mu.Unlock()
 			return
@@ -209,7 +218,7 @@ func (p *pool) sweep() {
 			continue
 		}
 		e.idle = append(keep[k], e.idle...)
-		if extra := len(e.idle) - p.size; extra > 0 { // пока шла проверка, fill успел дооткрыть
+		if extra := len(e.idle) - p.sizeFor(k); extra > 0 { // пока шла проверка, fill успел дооткрыть
 			for _, c := range e.idle[:extra] {
 				drop = append(drop, c.up)
 			}

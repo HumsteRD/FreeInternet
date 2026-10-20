@@ -8,6 +8,18 @@ import (
 	"time"
 )
 
+func TestOldCheckIntervalMigrates(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	os.WriteFile(path, []byte(`{"check_every":"15m0s"}`), 0o644)
+	if c, err := Load(path); err != nil || time.Duration(c.CheckEvery) != DefaultCheckEvery {
+		t.Fatalf("прежние 15 минут должны стать %s: %v %v", DefaultCheckEvery, time.Duration(c.CheckEvery), err)
+	}
+	os.WriteFile(path, []byte(`{"check_every":"7m0s"}`), 0o644)
+	if c, _ := Load(path); time.Duration(c.CheckEvery) != 7*time.Minute {
+		t.Fatal("заданный вручную интервал не трогаем")
+	}
+}
+
 func TestLoadCorruptKeepsCopy(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
 	broken := []byte(`{"sites":[{"host":"rutracker.org"}`)

@@ -21,3 +21,9 @@ func StopBypass(uint32) ([]string, error) { return nil, errUnsupported }
 func InternetVPN() string { return "" }
 
 func InternetRoute() (string, uint32) { return "", 0 }
+
+func AntiCheat() string { return "" }
+
+func ResetWFP() error { return errUnsupported }
+
+func KillWinws() int { return 0 }

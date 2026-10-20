@@ -148,6 +148,48 @@ func Delete(name string) error {
 	return s.Delete()
 }
 
+// RestartWithDependents перезапускает службу вместе с работавшими зависимыми — например службу
+// базовой фильтрации (BFE) с брандмауэром: так сбрасываются застрявшие фильтры Windows без
+// перезагрузки. Зависимые запускаются снова, даже если сама служба не перезапустилась.
+func RestartWithDependents(name string) error {
+	m, err := mgr.Connect()
+	if err != nil {
+		return err
+	}
+	defer m.Disconnect()
+	s, err := m.OpenService(name)
+	if err != nil {
+		return err
+	}
+	defer s.Close()
+	deps, err := s.ListDependentServices(svc.Active) // в порядке, обратном запуску
+	if err != nil {
+		return err
+	}
+	var errs []error
+	for _, d := range deps {
+		if ds, err := m.OpenService(d); err == nil {
+			errs = append(errs, Stop(ds))
+			ds.Close()
+		}
+	}
+	if err := Stop(s); err != nil {
+		errs = append(errs, fmt.Errorf("%s не остановлена: %w", name, err))
+	}
+	if err := s.Start(); err != nil && !errors.Is(err, windows.ERROR_SERVICE_ALREADY_RUNNING) {
+		errs = append(errs, fmt.Errorf("%s не запущена: %w", name, err))
+	}
+	for i := len(deps) - 1; i >= 0; i-- {
+		if ds, err := m.OpenService(deps[i]); err == nil {
+			if err := ds.Start(); err != nil && !errors.Is(err, windows.ERROR_SERVICE_ALREADY_RUNNING) {
+				errs = append(errs, fmt.Errorf("%s не запущена: %w", deps[i], err))
+			}
+			ds.Close()
+		}
+	}
+	return errors.Join(errs...)
+}
+
 // StopDriver останавливает и удаляет службу драйвера, например WinDivert: пока драйвер загружен,
 // его файл нельзя удалить. Нет такой службы — делать нечего. winws ставит драйвер заново сам.
 func StopDriver(name string) error {

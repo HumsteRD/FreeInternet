@@ -23,6 +23,12 @@ func (d *Daemon) SetGames(ids []string) error {
 		d.mu.Unlock()
 		return ErrBusy
 	}
+	if d.proc != nil && d.cfg.GameMode == "games" {
+		if err := restartAllowed(); err != nil {
+			d.mu.Unlock()
+			return err
+		}
+	}
 	d.cfg.Games = games
 	err := d.saveLocked()
 	restart := d.proc != nil && d.cfg.GameMode == "games"

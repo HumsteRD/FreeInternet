@@ -123,6 +123,7 @@ func (d *Daemon) SetTelegram(on bool) error {
 
 const (
 	cfRefreshEvery = time.Hour
+	cfRetryAfter   = 2 * time.Minute   // после неудачи
 	cfCacheName    = "telegram-cf.txt" // последний список общих доменов: Telegram работает, не дожидаясь GitHub
 )
 
@@ -146,6 +147,8 @@ func (d *Daemon) refreshCF(ctx context.Context, force bool) {
 	d.mu.Lock()
 	d.tgCFAt = time.Now()
 	if err != nil {
+		// Сразу после загрузки Windows сети ещё нет: повторим через пару минут, а не через час.
+		d.tgCFAt = time.Now().Add(cfRetryAfter - cfRefreshEvery)
 		d.mu.Unlock()
 		if ctx.Err() == nil {
 			d.log.Warn("список общих доменов Cloudflare не обновлён", "err", err)

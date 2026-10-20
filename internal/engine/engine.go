@@ -36,3 +36,11 @@ func (e *RunError) Reason() string {
 func (e *RunError) WinDivert() bool {
 	return strings.Contains(strings.ToLower(e.Output), "windivert:")
 }
+
+// WFPInUse — WinDivert не смог заново зарегистрироваться в фильтрах Windows (FWP_E_IN_USE,
+// «The object is referenced by other objects»): так бывает, если перезапустить обход, пока
+// загружен драйвер античита. Простой выгрузкой драйвера это не лечится.
+func (e *RunError) WFPInUse() bool {
+	out := strings.ToLower(e.Output)
+	return strings.Contains(out, "referenced by other objects") || strings.Contains(out, "8032000a")
+}

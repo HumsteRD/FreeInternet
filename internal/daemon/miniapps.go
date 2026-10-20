@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"fi/internal/tgproxy"
 )
@@ -58,10 +59,19 @@ func (d *Daemon) checkWorkerVersion(ctx context.Context, worker string) {
 		d.workerVer = 0
 		if ctx.Err() == nil {
 			d.log.Warn("воркер не ответил", "worker", worker, "err", err)
+			// Сразу после загрузки Windows сети ещё нет — спросим снова через минуту, несколько раз.
+			if d.workerRetries < 5 {
+				d.workerRetries++
+				time.AfterFunc(time.Minute, func() {
+					if ctx.Err() == nil {
+						d.checkWorkerVersion(ctx, worker)
+					}
+				})
+			}
 		}
 		return
 	}
-	d.workerVer = ver
+	d.workerVer, d.workerRetries = ver, 0
 	if ver < tgproxy.WorkerVersionWeb {
 		d.log.Warn("код воркера устарел — мини-приложения через него не откроются", "worker", worker, "version", ver)
 	}

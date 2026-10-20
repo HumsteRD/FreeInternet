@@ -328,7 +328,11 @@ function mainView(st) {
   const vpn = st.vpn
     ? `<section class="panel notice">${icon('globe', 16)}<span>Интернет идёт через VPN (${esc(st.vpn)}). Обход работает только для трафика мимо VPN, проверки и автоподбор на паузе, уведомлений не будет.</span></section>`
     : '';
+  const game = st.anti_cheat
+    ? `<section class="panel notice">${icon('play', 16)}<span>Идёт игра с античитом ${esc(st.anti_cheat)}. Обход работает, но FI не перезапускает его до выхода из игры: иначе античит заблокирует драйвер до перезагрузки.</span></section>`
+    : '';
   return `${heroView(st)}
+    ${game}
     ${errorLine()}
     ${vpn}
     ${selectNote(st)}
@@ -684,6 +688,14 @@ function settingsView(st) {
             </select>
             <button class="btn sm" data-action="select" ${st.task || st.vpn ? 'disabled' : ''} title="${st.vpn ? 'Выключите VPN: через него подбор выбрал бы наугад' : ''}">Подобрать</button>
           </div>
+        </div>
+        <div class="settings-row">
+          <span class="row-text"><span class="row-title-sm">Выключить QUIC в браузерах</span><span class="row-sub wrap">YouTube и сайты Google пойдут по TCP — обход держит его надёжнее, чем QUIC. Chrome, Edge, Brave и Яндекс покажут «управляется организацией» — это из-за этой настройки. Перезапустите браузер.</span></span>
+          <button class="toggle ${st.browser_quic_off ? 'on' : ''}" role="switch" aria-checked="${Boolean(st.browser_quic_off)}" aria-label="Выключить QUIC в браузерах" data-action="quic-off"></button>
+        </div>
+        <div class="settings-row">
+          <span class="row-text"><span class="row-title-sm">Выключать QUIC самому</span><span class="row-sub wrap">Если QUIC у YouTube стабильно не проходит, FI выключит его вместо подбора стратегии</span></span>
+          <button class="toggle ${st.quic_auto ? 'on' : ''}" role="switch" aria-checked="${Boolean(st.quic_auto)}" aria-label="Выключать QUIC самому" data-action="quic-auto"></button>
         </div>
         <div class="settings-row column">
           <span class="row-text"><span class="row-title-sm">Свои стратегии</span><span class="row-sub wrap">Из .bat другого набора zapret или файла с аргументами winws. FI пропустит только безопасные параметры и файлы из своего набора; свои стратегии участвуют в подборе.</span></span>
@@ -1103,6 +1115,12 @@ document.addEventListener('click', (event) => {
       break;
     case 'tg-shared-cf':
       command('set_telegram_shared_cf', { on: !state.status?.telegram?.shared_cf });
+      break;
+    case 'quic-off':
+      command('set_browser_quic_off', { on: !state.status?.browser_quic_off });
+      break;
+    case 'quic-auto':
+      command('set_quic_auto', { on: !state.status?.quic_auto });
       break;
     case 'via-worker-remove':
       command('remove_via_worker', { host: el.dataset.host });
