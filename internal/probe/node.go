@@ -106,6 +106,67 @@ func askNode(ctx context.Context, client *http.Client) (host string, again bool,
 	return host, false, nil
 }
 
+// Запасной видеосервер. Кэш сети (FindYouTubeNode) хранит только популярные ролики, свежие
+// и редкие YouTube отдаёт с серверов самого Google. Провайдер может закрыть их адреса целиком
+// (2026-10-21: 173.194.176.0/23 и 173.194.181.0/24 молчат на любое имя сайта), и тогда
+// популярное играет, а свежее висит, хотя проверка кэша проходит.
+
+// watchURL — страница ролика, из которой берётся ссылка на поток: «Me at the zoo», первый ролик YouTube.
+var watchURL = "https://www.youtube.com/watch?v=jNQXAC9IVRw"
+
+// streamNodes — параметр mn ссылки на поток: «sn-<кэш сети>,sn-<запасной сервер Google>».
+var streamNodes = regexp.MustCompile(`"serverAbrStreamingUrl":"[^"]*?(?:\?|&|\\u0026)mn(?:=|\\u003d)sn-([a-z0-9-]+)(?:%2C|,)sn-([a-z0-9-]+)`)
+
+// browserUA — без него YouTube может отдать урезанную страницу без ссылки на поток.
+const browserUA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36"
+
+// FindYouTubeFallback узнаёт запасной видеосервер YouTube из страницы ролика.
+func FindYouTubeFallback(ctx context.Context, client *http.Client) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, watchURL, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("User-Agent", browserUA)
+	req.Header.Set("Accept-Language", "ru")
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("запасной видеосервер YouTube: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("запасной видеосервер YouTube: HTTP %d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	if err != nil {
+		return "", fmt.Errorf("запасной видеосервер YouTube: %w", err)
+	}
+	m := streamNodes.FindSubmatch(body)
+	if m == nil {
+		return "", fmt.Errorf("запасной видеосервер YouTube: в странице ролика нет ссылки на поток")
+	}
+	host := "rr1---sn-" + string(m[2]) + ".googlevideo.com"
+	if _, err := lookupHost(ctx, host); err != nil {
+		return "", fmt.Errorf("запасной видеосервер YouTube: адреса %s нет в DNS", host)
+	}
+	return host, nil
+}
+
+// fallbackNeutral — имя сайта не из списков блокировок, которое серверы Google тоже принимают
+// (с чужим сертификатом): по нему видно, закрыт ли адрес целиком.
+const fallbackNeutral = "www.google.com"
+
+// WithYouTubeFallback добавляет проверку запасного видеосервера.
+func WithYouTubeFallback(targets []Target, host string) []Target {
+	if host == "" {
+		return targets
+	}
+	return append(slices.Clone(targets), Target{
+		Name: "YouTube: свежие видео", Group: "youtube", Kind: KindTLS, Host: host, Weight: 2, Neutral: fallbackNeutral,
+	})
+}
+
 // WithYouTubeNode направляет проверку видеосервера YouTube на узел этой сети.
 func WithYouTubeNode(targets []Target, host string) []Target {
 	if host == "" {

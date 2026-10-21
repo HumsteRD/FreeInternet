@@ -76,6 +76,15 @@ func Prepare(dst, baseDir string, userHosts []string, mode IpsetMode) error {
 	return WriteUserHosts(dst, userHosts)
 }
 
+// Generated — списки, которые Prepare пишет сам: в базовом наборе их может и не быть.
+func Generated(name string) bool {
+	switch name {
+	case userHostsFile, "list-exclude-user.txt", "ipset-exclude-user.txt", "ipset-all.txt":
+		return true
+	}
+	return false
+}
+
 // WriteUserHosts перезаписывает пользовательский список сайтов. winws перечитывает список,
 // когда меняется время изменения файла, поэтому перезапускать движок не нужно.
 func WriteUserHosts(dir string, hosts []string) error {

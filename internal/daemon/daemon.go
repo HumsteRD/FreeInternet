@@ -150,8 +150,8 @@ type Daemon struct {
 	selectNote string    // для окна: почему подбор прерван или почему стратегия сменилась сама
 	quietUntil time.Time // до этого времени автоподбор не запускается: прошлый ничего не нашёл
 
-	ytNode   string    // видеосервер YouTube этой сети
-	ytNodeAt time.Time // когда его узнавали
+	ytNode     cachedNode // видеосервер YouTube этой сети (кэш провайдера)
+	ytFallback cachedNode // запасной видеосервер Google: с него идут свежие и редкие ролики
 
 	appLatest  appupdate.Manifest
 	appChecked time.Time
@@ -764,11 +764,11 @@ func (d *Daemon) preemptCheck() bool {
 }
 
 func (d *Daemon) check(ctx context.Context) ([]Service, error) {
-	node := d.youtubeNode(ctx)
+	node, fallback := d.youtubeNode(ctx), d.youtubeFallback(ctx)
 	vpn := diag.InternetVPN()
 	d.mu.Lock()
 	srv := d.tg
-	targets := probe.WithYouTubeNode(checkTargets(d.cfg.MainSites(), srv != nil), node)
+	targets := probe.WithYouTubeFallback(probe.WithYouTubeNode(checkTargets(d.cfg.MainSites(), srv != nil), node), fallback)
 	if d.cfg.BrowserQUICOff {
 		targets = dropQUIC(targets)
 	}
@@ -857,11 +857,26 @@ func (d *Daemon) telegramResult(ctx context.Context, srv *tgproxy.Server) probe.
 	return r
 }
 
-// youtubeNode — видеосервер YouTube этой сети. Узнаём раз в сутки, после неудачи повторяем
-// через час; пока узел не известен, проверяется общий redirector.
+// cachedNode — видеосервер, адрес которого узнаём раз в сутки.
+type cachedNode struct {
+	host string
+	at   time.Time // когда его узнавали
+}
+
+// youtubeNode — видеосервер YouTube этой сети; пока он не известен, проверяется общий redirector.
 func (d *Daemon) youtubeNode(ctx context.Context) string {
+	return d.lookupNode(ctx, &d.ytNode, "видеосервер YouTube", probe.FindYouTubeNode)
+}
+
+// youtubeFallback — запасной видеосервер Google; пока он не известен, его проверки нет.
+func (d *Daemon) youtubeFallback(ctx context.Context) string {
+	return d.lookupNode(ctx, &d.ytFallback, "запасной видеосервер YouTube", probe.FindYouTubeFallback)
+}
+
+// lookupNode узнаёт адрес видеосервера раз в сутки, после неудачи повторяет через час.
+func (d *Daemon) lookupNode(ctx context.Context, n *cachedNode, what string, find func(context.Context, *http.Client) (string, error)) string {
 	d.mu.Lock()
-	host, at := d.ytNode, d.ytNodeAt
+	host, at := n.host, n.at
 	d.mu.Unlock()
 	again := 24 * time.Hour
 	if host == "" {
@@ -871,20 +886,20 @@ func (d *Daemon) youtubeNode(ctx context.Context) string {
 		return host
 	}
 
-	found, err := probe.FindYouTubeNode(ctx, d.http)
+	found, err := find(ctx, d.http)
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	d.ytNodeAt = time.Now()
+	n.at = time.Now()
 	if err != nil {
 		if ctx.Err() == nil {
-			d.log.Warn("видеосервер YouTube не определён", "err", err)
+			d.log.Warn(what+" не определён", "err", err)
 		}
-		return d.ytNode
+		return n.host
 	}
-	if found != d.ytNode {
-		d.log.Info("видеосервер YouTube", "host", found)
+	if found != n.host {
+		d.log.Info(what, "host", found)
 	}
-	d.ytNode = found
+	n.host = found
 	return found
 }
 
@@ -1119,7 +1134,7 @@ func (d *Daemon) startSelect(quick bool) error {
 		defer d.tasks.Done()
 		defer cancel()
 		// Узел YouTube узнаём до остановки движка: без обхода redirector может не отвечать.
-		opts.Targets = probe.WithYouTubeNode(opts.Targets, d.youtubeNode(ctx))
+		opts.Targets = probe.WithYouTubeFallback(probe.WithYouTubeNode(opts.Targets, d.youtubeNode(ctx)), d.youtubeFallback(ctx))
 		// Стратегии проверяются по очереди, каждая со своим движком: текущий мешал бы.
 		d.stopEngine()
 		if others, err := engine.Conflicts(); err == nil && len(others) > 0 {

@@ -23,7 +23,9 @@ func TestCustomStrategies(t *testing.T) {
 	d.baseStrategies = []strategy.Strategy{{Name: "general (ALT)"}}
 	d.rebuildStrategiesLocked()
 
-	text := "--wf-tcp=443 --filter-tcp=443 --hostlist=%LISTS%list-general.txt --dpi-desync=fake --dpi-desync-fake-tls=%BIN%fake.bin"
+	// Пользовательские списки FI создаёт сам при запуске: в наборе их нет, но .bat Flowseal на них ссылается.
+	text := "--wf-tcp=443 --filter-tcp=443 --hostlist=%LISTS%list-general.txt --hostlist=%LISTS%list-general-user.txt " +
+		"--hostlist-exclude=%LISTS%list-exclude-user.txt --dpi-desync=fake --dpi-desync-fake-tls=%BIN%fake.bin"
 	if err := d.AddCustomStrategy("мой", text); err != nil {
 		t.Fatal(err)
 	}

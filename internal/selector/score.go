@@ -47,6 +47,11 @@ func NewRun(strategy string, results []probe.Result) Run {
 	run := Run{Strategy: strategy, Results: results}
 	index := map[string]int{}
 	for _, r := range results {
+		// Адрес, закрытый целиком, не открывает ни одна стратегия: в оценке он ничего не различает,
+		// а «идеальный» прогон с ним недостижим, и быстрый подбор перебирал бы всё.
+		if r.Status == probe.IPBlocked {
+			continue
+		}
 		i, ok := index[r.Target.Group]
 		if !ok {
 			i = len(run.Groups)

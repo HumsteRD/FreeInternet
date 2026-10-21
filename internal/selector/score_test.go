@@ -33,6 +33,16 @@ func TestDropUnreachable(t *testing.T) {
 	}
 }
 
+func TestIPBlockedNotScored(t *testing.T) {
+	run := NewRun("A", []probe.Result{
+		result("youtube", 2, probe.OK, time.Second),
+		result("youtube", 2, probe.IPBlocked, 0),
+	})
+	if score, max, _ := run.Total(); score != max || max != 2 {
+		t.Fatalf("оценка %.1f из %.1f: закрытый адрес не должен мешать «идеальному» прогону", score, max)
+	}
+}
+
 func TestBestForGroup(t *testing.T) {
 	runs := []Run{
 		NewRun(Baseline, []probe.Result{

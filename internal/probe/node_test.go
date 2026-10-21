@@ -84,6 +84,50 @@ func TestFindYouTubeNode(t *testing.T) {
 	}
 }
 
+func TestFindYouTubeFallback(t *testing.T) {
+	page := ""
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.Write([]byte(page)) }))
+	defer srv.Close()
+	oldURL, oldLookup := watchURL, lookupHost
+	defer func() { watchURL, lookupHost = oldURL, oldLookup }()
+	watchURL = srv.URL
+	lookupHost = func(_ context.Context, host string) ([]string, error) {
+		if host == "rr1---sn-n8v7kn76.googlevideo.com" {
+			return []string{"192.0.2.1"}, nil
+		}
+		return nil, errors.New("no such host")
+	}
+
+	// Так ссылка на поток выглядит в странице ролика (2026-10-21).
+	page = `..."serverAbrStreamingUrl":"https://rr1---sn-hpg5avbpj-n8ms.googlevideo.com/videoplayback?expire=1&ip=192.0.2.7` +
+		`&mh=Yu&mm=18%2C29&mn=sn-hpg5avbpj-n8ms%2Csn-n8v7kn76&ms=aub%2Crdu&sabr=1"...`
+	host, err := FindYouTubeFallback(context.Background(), srv.Client())
+	if err != nil || host != "rr1---sn-n8v7kn76.googlevideo.com" {
+		t.Fatalf("FindYouTubeFallback = %q, %v", host, err)
+	}
+
+	page = `"serverAbrStreamingUrl":"https://x.googlevideo.com/videoplayback?mn=sn-a%2Csn-unknown1"`
+	if host, err := FindYouTubeFallback(context.Background(), srv.Client()); err == nil {
+		t.Fatalf("принят сервер, которого нет в DNS: %q", host)
+	}
+	page = "<html>согласие на cookies</html>"
+	if _, err := FindYouTubeFallback(context.Background(), srv.Client()); err == nil {
+		t.Fatal("страница без ссылки на поток принята")
+	}
+}
+
+func TestWithYouTubeFallback(t *testing.T) {
+	base := DefaultTargets()
+	if got := WithYouTubeFallback(base, ""); len(got) != len(base) {
+		t.Fatal("без запасного сервера цели должны остаться прежними")
+	}
+	got := WithYouTubeFallback(base, "rr1---sn-n8v7kn76.googlevideo.com")
+	last := got[len(got)-1]
+	if len(got) != len(base)+1 || last.Host != "rr1---sn-n8v7kn76.googlevideo.com" || last.Group != "youtube" || last.Neutral == "" {
+		t.Fatalf("проверка свежих видео: %+v", last)
+	}
+}
+
 func TestWithYouTubeNode(t *testing.T) {
 	base := DefaultTargets()
 	if got := WithYouTubeNode(base, ""); len(got) != len(base) || got[2].Host != videoRedirector {

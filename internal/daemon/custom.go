@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 
+	"fi/internal/lists"
 	"fi/internal/strategy"
 )
 
@@ -77,6 +78,10 @@ func (d *Daemon) AddCustomStrategy(name, text string) error {
 		return errors.New("сначала установите набор стратегий: свои берут из него файлы подделок и списки")
 	}
 	for _, file := range s.CustomFiles() {
+		// Пользовательские списки FI пишет сам при запуске обхода — в наборе их нет.
+		if name, ok := strings.CutPrefix(file, "lists/"); ok && lists.Generated(name) {
+			continue
+		}
 		if _, err := os.Stat(filepath.Join(d.cfg.BaseDir, filepath.FromSlash(file))); err != nil {
 			return fmt.Errorf("в наборе нет файла %s — стратегия не запустится", file)
 		}

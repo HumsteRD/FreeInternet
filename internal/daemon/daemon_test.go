@@ -254,6 +254,13 @@ func TestRegressedOnlyWhenStrategyCanHelp(t *testing.T) {
 	if !regressed(prev, dpi) {
 		t.Error("сброс соединения — помеха DPI, другая стратегия может помочь")
 	}
+	closed := summarize([]probe.Result{
+		{Target: probe.Target{Name: "Discord: сайт", Group: "discord"}, Status: probe.IPBlocked},
+		{Target: probe.Target{Name: "Discord: CDN", Group: "discord"}, Status: probe.OK},
+	})
+	if regressed(prev, closed) {
+		t.Error("адрес закрыт целиком — ни одна стратегия его не откроет")
+	}
 	// Перепроверка нужна для любой поломки: окно уведомляет только о подтверждённых.
 	if !broke(prev, ipBlock) || !broke(prev, dpi) {
 		t.Error("broke должен замечать любую поломку работавшего сервиса")

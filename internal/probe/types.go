@@ -20,6 +20,7 @@ const (
 	QUICFail    Status = "QUIC_FAIL"    // QUIC/HTTP3 не проходит
 	UDPFail     Status = "UDP_FAIL"     // нет ответа STUN — так выглядит блокировка звонков и голоса
 	HTTPBlocked Status = "HTTP_BLOCKED" // сервер ответил 451
+	IPBlocked   Status = "IP_BLOCKED"   // сервер молчит и для сайта не из списков блокировок — адрес закрыт целиком
 	Failed      Status = "ERROR"        // прочая ошибка
 )
 
@@ -44,6 +45,9 @@ type Target struct {
 	Path   string `json:"path,omitempty"`
 	Port   int    `json:"port,omitempty"` // по умолчанию 443, для STUN — 3478
 	Weight int    `json:"weight"`         // вклад в оценку группы; критичные для работы сервиса цели весят больше
+	// Neutral — имя сайта не из списков блокировок, которое сервер тоже принимает. Если сервер
+	// молчит и с ним, провайдер закрыл адрес целиком (IPBlocked): стратегия обхода не поможет.
+	Neutral string `json:"neutral,omitempty"`
 }
 
 // Result — итог проверки цели.

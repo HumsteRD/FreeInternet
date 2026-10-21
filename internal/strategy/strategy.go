@@ -2,6 +2,7 @@
 package strategy
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 )
@@ -40,16 +41,21 @@ func GamePorts(mode string) (tcp, udp string) {
 	}
 }
 
-// Expand подставляет значения в аргументы.
+// Expand подставляет значения в аргументы. Если в папке списков есть list-google,
+// YouTube попадает и в правила QUIC (см. withGoogleQUIC).
 func (s Strategy) Expand(v Vars) []string {
+	src := s.Args
+	if _, err := os.Stat(filepath.Join(v.Lists, "list-google.txt")); v.Lists != "" && err == nil {
+		src = withGoogleQUIC(src)
+	}
 	r := strings.NewReplacer(
 		"{bin}", withSep(v.Bin),
 		"{lists}", withSep(v.Lists),
 		"{game_tcp}", orDefault(v.GameTCP, GameOff),
 		"{game_udp}", orDefault(v.GameUDP, GameOff),
 	)
-	args := make([]string, len(s.Args))
-	for i, a := range s.Args {
+	args := make([]string, len(src))
+	for i, a := range src {
 		args[i] = r.Replace(a)
 	}
 	return args

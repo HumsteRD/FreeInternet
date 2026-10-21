@@ -3,6 +3,8 @@ package probe
 import (
 	"context"
 	"crypto/x509"
+	"errors"
+	"net"
 	"strconv"
 	"sync"
 	"time"
@@ -104,6 +106,9 @@ func (p *Prober) attempt(ctx context.Context, t Target) Result {
 	default:
 		p.checkTLS(ctx, t, &r)
 	}
+	if t.Neutral != "" && (r.Status == TLSTimeout || r.Status == TLSReset) && p.addressClosed(ctx, t, ip) {
+		r.Status, r.Detail = IPBlocked, "сервер молчит и для "+t.Neutral+": "+r.Detail
+	}
 	// Подмену DNS показываем в первую очередь: приложения пользователя пойдут
 	// на адрес-заглушку, даже если по настоящему адресу всё работает.
 	if dnsStatus == DNSSpoof {
@@ -111,6 +116,18 @@ func (p *Prober) attempt(ctx context.Context, t Target) Result {
 		r.Status = DNSSpoof
 	}
 	return r
+}
+
+// addressClosed — сервер не отвечает и на рукопожатие с именем t.Neutral, которого нет в списках
+// блокировок. Чужой сертификат в ответ — значит, сервер отвечает, и молчал он из-за имени цели.
+func (p *Prober) addressClosed(ctx context.Context, t Target, ip string) bool {
+	conn, err := p.dialTLS(ctx, t.Neutral, net.JoinHostPort(ip, p.portFor(t, 443)))
+	if err == nil {
+		conn.Close()
+		return false
+	}
+	var se *stageError
+	return errors.As(err, &se) && (se.status == TCPFail || se.status == TLSTimeout)
 }
 
 // retryable — сбои, которые случаются и без блокировки, от потерь в сети.
