@@ -27,11 +27,12 @@ type Process struct {
 	waitErr error
 }
 
-// Start запускает winws и ждёт, пока он начнёт перехват.
+// Start запускает winws и ждёт, пока он начнёт перехват. Приоритет у winws высокий: через него
+// идёт сетевой трафик, и когда игра грузит процессор, пакеты не должны ждать в очереди.
 func Start(ctx context.Context, exe string, args []string) (*Process, error) {
 	cmd := exec.Command(exe, args...)
 	cmd.Dir = filepath.Dir(exe)
-	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: windows.CREATE_NO_WINDOW}
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: windows.CREATE_NO_WINDOW | windows.HIGH_PRIORITY_CLASS}
 	out := &outputWatcher{marker: "capture is started", ready: make(chan struct{})}
 	cmd.Stdout, cmd.Stderr = out, out
 	if err := cmd.Start(); err != nil {

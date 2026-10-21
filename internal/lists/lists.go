@@ -20,6 +20,9 @@ const placeholderHost = "domain.example.abc"
 
 const userHostsFile = "list-general-user.txt"
 
+// GameIpset — адреса для игровых правил (см. strategy.withGameIpset).
+const GameIpset = "ipset-game.txt"
+
 // IpsetMode — какие адреса обходить по IP, а не по имени сайта.
 type IpsetMode string
 
@@ -52,21 +55,30 @@ func Prepare(dst, baseDir string, userHosts []string, mode IpsetMode) error {
 		"list-exclude-user.txt":  placeholderHost + "\n",
 		"ipset-exclude-user.txt": NoneMarker + "\n",
 	}
+	// Flowseal при выключенном ipset хранит полный список в .backup.
+	backup := filepath.Join(baseDir, "ipset-all.txt.backup")
+	_, berr := os.Stat(backup)
 	switch mode {
 	case IpsetNone, "":
 		files["ipset-all.txt"] = NoneMarker + "\n"
 	case IpsetAny:
 		files["ipset-all.txt"] = ""
+		files[GameIpset] = ""
 	case IpsetLoaded:
-		// Flowseal при выключенном ipset хранит полный список в .backup.
-		backup := filepath.Join(baseDir, "ipset-all.txt.backup")
-		if _, err := os.Stat(backup); err == nil {
+		if berr == nil {
 			if err := copyFile(backup, filepath.Join(dst, "ipset-all.txt")); err != nil {
 				return err
 			}
 		}
 	default:
 		return fmt.Errorf("неизвестный режим ipset %q", mode)
+	}
+	// Игровые правила Flowseal берут адреса из ipset-all, и при выключенном ipset игровой фильтр
+	// не обходил ничего. У них свой список — полный ipset набора, что бы ни было выбрано для сайтов.
+	if _, ok := files[GameIpset]; !ok && berr == nil {
+		if err := copyFile(backup, filepath.Join(dst, GameIpset)); err != nil {
+			return err
+		}
 	}
 	for name, content := range files {
 		if err := writeAtomic(filepath.Join(dst, name), []byte(content)); err != nil {
@@ -79,7 +91,7 @@ func Prepare(dst, baseDir string, userHosts []string, mode IpsetMode) error {
 // Generated — списки, которые Prepare пишет сам: в базовом наборе их может и не быть.
 func Generated(name string) bool {
 	switch name {
-	case userHostsFile, "list-exclude-user.txt", "ipset-exclude-user.txt", "ipset-all.txt":
+	case userHostsFile, "list-exclude-user.txt", "ipset-exclude-user.txt", "ipset-all.txt", GameIpset:
 		return true
 	}
 	return false

@@ -47,10 +47,20 @@ func TestPrepare(t *testing.T) {
 	}
 	assertFile(t, filepath.Join(dst, userHostsFile), placeholderHost+"\n")
 
+	assertFile(t, filepath.Join(dst, GameIpset), "1.2.3.0/24\n")
+
 	if err := Prepare(dst, base, nil, IpsetAny); err != nil {
 		t.Fatal(err)
 	}
 	assertFile(t, filepath.Join(dst, "ipset-all.txt"), "")
+	assertFile(t, filepath.Join(dst, GameIpset), "")
+
+	// ipset для сайтов выключен, а игровому фильтру адреса всё равно нужны.
+	if err := Prepare(dst, base, nil, IpsetNone); err != nil {
+		t.Fatal(err)
+	}
+	assertFile(t, filepath.Join(dst, "ipset-all.txt"), NoneMarker+"\n")
+	assertFile(t, filepath.Join(dst, GameIpset), "1.2.3.0/24\n")
 }
 
 func TestDomainSet(t *testing.T) {

@@ -122,21 +122,24 @@ type Daemon struct {
 	checkedAt      time.Time
 	lastSelect     time.Time
 
-	tg          *tgproxy.Server
-	tgStop      context.CancelFunc
-	tgDone      chan struct{}
-	tgErr       string
-	tgCF        []string  // общие домены Cloudflare (tg-ws-proxy)
-	tgCFAt      time.Time // когда их обновляли
-	web         *tgproxy.WebProxy
-	webDone     chan struct{}
-	webErr      string
-	antiCheat   string // запущенный античит: пока он есть, обход не перезапускается
-	lastResults []probe.Result
-	dnsBroken   bool  // системный DNS не отвечает: браузер может не открывать сайты
-	quicFails   int   // проверок подряд, где не прошёл только QUIC
-	workerVer   int   // версия кода воркера; 0 — не знаем
-	workerKeyOK *bool // в воркере код с ключом FI; nil — не проверяли
+	tg        *tgproxy.Server
+	tgStop    context.CancelFunc
+	tgDone    chan struct{}
+	tgErr     string
+	tgCF      []string  // общие домены Cloudflare (tg-ws-proxy)
+	tgCFAt    time.Time // когда их обновляли
+	web       *tgproxy.WebProxy
+	webDone   chan struct{}
+	webErr    string
+	antiCheat string    // запущенный античит: пока он есть, обход не перезапускается
+	game      gameWatch // проверки интернета, пока идёт игра с античитом
+	// minorPending — второстепенный сбой отложил подбор до следующей плановой проверки.
+	minorPending bool
+	lastResults  []probe.Result
+	dnsBroken    bool  // системный DNS не отвечает: браузер может не открывать сайты
+	quicFails    int   // проверок подряд, где не прошёл только QUIC
+	workerVer    int   // версия кода воркера; 0 — не знаем
+	workerKeyOK  *bool // в воркере код с ключом FI; nil — не проверяли
 	// workerRetries — сколько раз подряд воркер не ответил при проверке версии.
 	workerRetries int
 
@@ -482,6 +485,7 @@ func (d *Daemon) watchVPN(ctx context.Context) {
 		if ac := antiCheat(); ac != lastAC {
 			d.mu.Lock()
 			d.antiCheat = ac
+			d.game = gameWatch{at: time.Now()}
 			d.mu.Unlock()
 			if ac != "" {
 				d.log.Info("запущена игра с античитом — обход работает, но не перезапускается до выхода из неё", "anticheat", ac)
@@ -490,6 +494,8 @@ func (d *Daemon) watchVPN(ctx context.Context) {
 				d.afterGame()
 			}
 			lastAC = ac
+		} else if ac != "" {
+			d.guardGame(ctx, ac)
 		}
 		vpn, physical := netRoute()
 		changed := vpn != last
@@ -695,7 +701,7 @@ func (d *Daemon) watch(proc *engine.Process) {
 	}
 	time.Sleep(restartDelay)
 	d.mu.Lock()
-	retry = d.cfg.Enabled && d.proc == nil && d.task == nil
+	retry = d.cfg.Enabled && d.proc == nil && d.task == nil && d.antiCheat == "" // в игре — после неё (afterGame)
 	d.mu.Unlock()
 	if retry {
 		d.startEngine()
@@ -934,8 +940,11 @@ func (d *Daemon) periodicCheck(ctx context.Context) (soon bool) {
 		return false
 	}
 	down := d.cfg.Enabled && d.proc == nil && d.task == nil && d.baseErr == nil
+	inGame := d.antiCheat != ""
 	d.mu.Unlock()
-	if down {
+	// Во время игры с античитом обход не поднимаем: запуск застрял бы в драйвере, а если его
+	// выключил guardGame — снова заклинил бы интернет. После игры его поднимет afterGame.
+	if down && !inGame {
 		// Обход должен работать, но не запущен: прошлый запуск не удался. Без повтора служба
 		// так и осталась бы без обхода.
 		d.log.Info("обход включён, но не работает — запускаю снова")
@@ -978,6 +987,13 @@ func (d *Daemon) periodicCheck(ctx context.Context) (soon bool) {
 		}
 		return true
 	case !broke(prev, services):
+		// Второстепенная поломка, отложенная прошлой проверкой, держится и сейчас — подбираем.
+		if d.takeMinorPending() && autoFix && !paused && stillFixable(services) {
+			d.log.Info("второстепенный сбой не прошёл к следующей проверке — подбираю стратегию заново")
+			if err := d.startSelect(true); err != nil {
+				d.log.Warn("подбор не запущен", "err", err)
+			}
+		}
 		return false
 	}
 	// Сначала убеждаемся, что поломка не случайная: окно уведомляет только о подтверждённой,
@@ -998,6 +1014,12 @@ func (d *Daemon) periodicCheck(ctx context.Context) (soon bool) {
 		d.log.Info("сбой был временным")
 		return false
 	case !autoFix || paused || !regressed(prev, services):
+		return false
+	case minorOnly(d.results()):
+		d.mu.Lock()
+		d.minorPending = true
+		d.mu.Unlock()
+		d.log.Info("сломалось второстепенное — подберу стратегию, если не пройдёт к следующей проверке")
 		return false
 	}
 	d.log.Info("сервис перестал работать — подбираю стратегию заново")

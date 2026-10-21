@@ -262,6 +262,39 @@ func strategyLabel(name string) string {
 	return name
 }
 
+// minorOnly — из сбоев, которые лечит стратегия, нет ни одного у важной цели (вес 2 и больше):
+// сломались только свои сайты, активности или обновления Discord. Подбор на минуту прерывает
+// весь интернет, поэтому ради такого сбоя он ждёт, не пройдёт ли тот сам.
+func minorOnly(results []probe.Result) bool {
+	minor := false
+	for _, r := range results {
+		if r.Status == probe.OK || r.Status == probe.Slow || !strategyFixes(r.Status) {
+			continue
+		}
+		if r.Target.Weight >= 2 {
+			return false
+		}
+		minor = true
+	}
+	return minor
+}
+
+// stillFixable — какой-то сервис всё ещё не работает так, что может помочь другая стратегия.
+func stillFixable(services []Service) bool {
+	return slices.ContainsFunc(services, func(s Service) bool {
+		return (s.State == StateFail || s.State == StatePartial) && s.fixable
+	})
+}
+
+// takeMinorPending — был ли отложен подбор из-за второстепенного сбоя; флаг сбрасывается.
+func (d *Daemon) takeMinorPending() bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	pending := d.minorPending
+	d.minorPending = false
+	return pending
+}
+
 // strategyFixes — такой сбой бывает от помех DPI, и другая стратегия может его исправить.
 func strategyFixes(s probe.Status) bool {
 	switch s {

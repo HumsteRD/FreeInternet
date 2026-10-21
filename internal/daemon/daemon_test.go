@@ -238,6 +238,21 @@ func TestOfflineAndStrategyLabel(t *testing.T) {
 	}
 }
 
+func TestMinorOnly(t *testing.T) {
+	res := func(weight int, st probe.Status) probe.Result {
+		return probe.Result{Target: probe.Target{Weight: weight}, Status: st}
+	}
+	if !minorOnly([]probe.Result{res(1, probe.TLSTimeout), res(3, probe.OK)}) {
+		t.Error("завис только свой сайт — второстепенное, подбор подождёт")
+	}
+	if minorOnly([]probe.Result{res(1, probe.TLSTimeout), res(3, probe.TLSReset)}) {
+		t.Error("сломался gateway Discord — подбор нужен сразу")
+	}
+	if minorOnly([]probe.Result{res(1, probe.TCPFail), res(2, probe.OK)}) {
+		t.Error("закрытый по адресу сайт стратегия не лечит — это не повод для подбора вовсе")
+	}
+}
+
 func TestRegressedOnlyWhenStrategyCanHelp(t *testing.T) {
 	prev := []Service{{ID: "discord", State: StateOK}}
 	ipBlock := summarize([]probe.Result{

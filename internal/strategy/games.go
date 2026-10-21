@@ -28,6 +28,34 @@ var Games = []Game{
 	{ID: "minecraft", Title: "Minecraft", TCP: "25565", UDP: "19132-19133"},
 }
 
+const (
+	allIpset  = "--ipset={lists}ipset-all.txt"
+	gameIpset = "--ipset={lists}ipset-game.txt" // lists.GameIpset
+)
+
+// withGameIpset переводит игровые правила (с портами {game_tcp} или {game_udp}) на свой список
+// адресов: у Flowseal они берут ipset-all, а при выключенном ipset он пуст, и игровой фильтр
+// не обходил ничего — только гонял весь трафик игр через winws.
+func withGameIpset(args []string) []string {
+	out := slices.Clone(args)
+	start := 0
+	for i := 0; i <= len(out); i++ {
+		if i < len(out) && out[i] != "--new" {
+			continue
+		}
+		p := out[start:i]
+		if slices.Contains(p, "--filter-tcp={game_tcp}") || slices.Contains(p, "--filter-udp={game_udp}") {
+			for j, a := range p {
+				if a == allIpset {
+					p[j] = gameIpset
+				}
+			}
+		}
+		start = i + 1
+	}
+	return out
+}
+
 // GamePortsFor возвращает порты игрового фильтра. Для режима games — порты выбранных игр,
 // для остальных режимов — как GamePorts.
 func GamePortsFor(mode string, games []string) (tcp, udp string) {

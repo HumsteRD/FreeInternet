@@ -1,6 +1,28 @@
 package strategy
 
-import "testing"
+import (
+	"slices"
+	"strings"
+	"testing"
+)
+
+func TestWithGameIpset(t *testing.T) {
+	// Как в general (ALT13): обычное правило по ipset и два игровых.
+	args := strings.Fields("--wf-tcp=443,{game_tcp} " +
+		"--filter-tcp=80,443 --ipset={lists}ipset-all.txt --dpi-desync=fake --new " +
+		"--filter-tcp={game_tcp} --ipset={lists}ipset-all.txt --ipset-exclude={lists}ipset-exclude.txt --dpi-desync=fake --new " +
+		"--filter-udp={game_udp} --ipset={lists}ipset-all.txt --dpi-desync=fake")
+	got := withGameIpset(args)
+	if got[2] != "--ipset={lists}ipset-all.txt" {
+		t.Fatal("правило для сайтов должно остаться на ipset-all: его выбирает человек")
+	}
+	if got[6] != gameIpset || got[len(got)-2] != gameIpset {
+		t.Fatalf("игровые правила не переведены на свой список: %v", got)
+	}
+	if slices.Contains(args, gameIpset) {
+		t.Fatal("исходные аргументы стратегии изменились")
+	}
+}
 
 func TestMergePorts(t *testing.T) {
 	cases := []struct {
