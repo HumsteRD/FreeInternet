@@ -816,7 +816,7 @@ function viaWorkerSection(st) {
     hint = 'Нужен включённый прокси для Telegram: сайты через воркер работают вместе с ним.';
   } else if (!tg.worker) {
     hint = 'Нужен свой Cloudflare Worker — задайте его выше, в разделе Telegram. ' + hint;
-  } else if (sites.length && (tg.worker_key_ok === false || tg.worker_outdated)) {
+  } else if ((sites.length || st.youtube_via_worker) && (tg.worker_key_ok === false || tg.worker_outdated)) {
     warn = true;
     hint = 'В воркере старый код: нажмите «Скопировать код воркера», вставьте его в Cloudflare (Edit code → Deploy) и нажмите «Проверить воркер».';
   }
@@ -842,8 +842,12 @@ function viaWorkerSection(st) {
           </div>
         </div>
         <div class="settings-row">
-          <span class="row-text"><span class="row-title-sm">Применять в браузерах</span><span class="row-sub wrap">FI поставит в Windows сценарий настройки прокси (Параметры → Сеть и Интернет → Прокси-сервер): через FI пойдут только сайты из списка, остальное — напрямую. Выключите здесь или уберите сценарий в Windows — FI его больше не поставит.</span></span>
-          <button class="toggle ${st.via_worker_browsers ? 'on' : ''}" role="switch" aria-checked="${Boolean(st.via_worker_browsers)}" aria-label="Применять в браузерах" data-action="via-worker-browsers" ${!sites.length ? 'disabled' : ''}></button>
+          <span class="row-text"><span class="row-title-sm">Свежие ролики YouTube через воркер</span><span class="row-sub wrap">Популярное YouTube отдаёт с кэша провайдера, а свежее и редкое — с серверов Google, которые провайдер может закрыть целиком: обход DPI их не откроет. Видеосерверы пойдут через FI: напрямую, если сервер отвечает, и через воркер, если молчит. Включает и сценарий прокси ниже.</span></span>
+          <button class="toggle ${st.youtube_via_worker ? 'on' : ''}" role="switch" aria-checked="${Boolean(st.youtube_via_worker)}" aria-label="Свежие ролики YouTube через воркер" data-action="youtube-via-worker" ${!tg.enabled || !tg.worker ? 'disabled' : ''}></button>
+        </div>
+        <div class="settings-row">
+          <span class="row-text"><span class="row-title-sm">Применять в браузерах</span><span class="row-sub wrap">FI поставит в Windows сценарий настройки прокси (Параметры → Сеть и Интернет → Прокси-сервер): через FI пойдут только сайты из списка и видеосерверы YouTube, если они включены выше, остальное — напрямую. Выключите здесь или уберите сценарий в Windows — FI его больше не поставит.</span></span>
+          <button class="toggle ${st.via_worker_browsers ? 'on' : ''}" role="switch" aria-checked="${Boolean(st.via_worker_browsers)}" aria-label="Применять в браузерах" data-action="via-worker-browsers" ${!sites.length && !st.youtube_via_worker ? 'disabled' : ''}></button>
         </div>
       </div>
     </section>`;
@@ -1142,6 +1146,9 @@ document.addEventListener('click', (event) => {
       break;
     case 'via-worker-browsers':
       command('set_via_worker_browsers', { on: !state.status?.via_worker_browsers });
+      break;
+    case 'youtube-via-worker':
+      command('set_youtube_via_worker', { on: !state.status?.youtube_via_worker });
       break;
     case 'via-worker-remove':
       command('remove_via_worker', { host: el.dataset.host });

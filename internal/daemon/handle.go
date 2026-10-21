@@ -132,6 +132,10 @@ func (d *Daemon) Handle(ctx context.Context, method string, params json.RawMessa
 		if err = decode(params, &on); err == nil {
 			err = d.SetViaWorkerBrowsers(on.On)
 		}
+	case "set_youtube_via_worker":
+		if err = decode(params, &on); err == nil {
+			err = d.SetYouTubeViaWorker(on.On)
+		}
 	case "worker_code":
 		return map[string]string{"code": d.WorkerCode()}, nil
 	case "recheck_worker":

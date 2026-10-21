@@ -11,6 +11,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestIsTelegramWeb(t *testing.T) {
@@ -161,6 +162,87 @@ func TestWebProxyDirectThenWorker(t *testing.T) {
 		t.Fatalf("PAC: %v %v", resp, err)
 	}
 	resp.Body.Close()
+}
+
+func TestWebProxyFallbackOnSilence(t *testing.T) {
+	old := silentTimeout
+	silentTimeout = 200 * time.Millisecond
+	defer func() { silentTimeout = old }()
+
+	silentHosts := map[string]bool{}
+	p := &WebProxy{
+		Server:   &Server{Worker: "fi.example.workers.dev"},
+		Fallback: func() []string { return []string{"googlevideo.com"} },
+		dialDirect: func(_ context.Context, addr string) (net.Conn, error) {
+			host, _, _ := net.SplitHostPort(addr)
+			if silentHosts[host] {
+				return silentUpstream(), nil
+			}
+			return echoUpstream("direct:"), nil
+		},
+		dialWorker: func(context.Context, string, int) (net.Conn, error) { return echoUpstream("worker:"), nil },
+	}
+	srv := httptest.NewServer(p)
+	defer srv.Close()
+
+	hello := "\x16\x03\x01\x00\x04ping"
+	if code, got := tunnelTLS(t, srv, "rr1---sn-cache.googlevideo.com:443", hello); code != 200 || got != "direct:"+hello {
+		t.Fatalf("сервер отвечает напрямую: %d %q", code, got)
+	}
+	silentHosts["rr1---sn-closed.googlevideo.com"] = true
+	if code, got := tunnelTLS(t, srv, "rr1---sn-closed.googlevideo.com:443", hello); code != 200 || got != "worker:"+hello {
+		t.Fatalf("сервер молчит — то же приветствие должно уйти через воркер: %d %q", code, got)
+	}
+	if code, _ := tunnelTLS(t, srv, "example.com:443", hello); code != http.StatusForbidden {
+		t.Fatalf("сайт не из списка: %d", code)
+	}
+	resp, err := http.Get(srv.URL + SitesPACPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if !strings.Contains(string(body), `dnsDomainIs(host, ".googlevideo.com")`) {
+		t.Fatalf("видеосерверов нет в PAC для браузеров:\n%s", body)
+	}
+}
+
+func TestReadTLSRecord(t *testing.T) {
+	long := "\x16\x03\x01\x07\x00" + strings.Repeat("x", 0x700) // приветствие с ML-KEM — больше одного пакета
+	got, err := readTLSRecord(bufio.NewReader(strings.NewReader(long + "rest")))
+	if err != nil || string(got) != long {
+		t.Fatalf("прочитано %d байт, %v", len(got), err)
+	}
+}
+
+// silentUpstream — сервер, который принимает данные и никогда не отвечает.
+func silentUpstream() net.Conn {
+	ours, theirs := net.Pipe()
+	go io.Copy(io.Discard, theirs)
+	return ours
+}
+
+// tunnelTLS — как tunnel, но отправляет запись TLS.
+func tunnelTLS(t *testing.T, proxy *httptest.Server, target, record string) (int, string) {
+	t.Helper()
+	conn, err := net.Dial("tcp", proxy.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	conn.SetDeadline(time.Now().Add(5 * time.Second))
+	io.WriteString(conn, "CONNECT "+target+" HTTP/1.1\r\nHost: "+target+"\r\n\r\n")
+	br := bufio.NewReader(conn)
+	resp, err := http.ReadResponse(br, &http.Request{Method: http.MethodConnect})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return resp.StatusCode, ""
+	}
+	io.WriteString(conn, record)
+	reply, _ := io.ReadAll(br)
+	return resp.StatusCode, string(reply)
 }
 
 func TestWebProxyWithoutWorker(t *testing.T) {

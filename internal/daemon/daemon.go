@@ -72,6 +72,7 @@ type Status struct {
 	ViaWorker    []string `json:"via_worker"` // сайты через воркер
 	// ViaWorkerBrowsers — FI ставит в Windows сценарий прокси, чтобы сайты через воркер шли и в браузерах.
 	ViaWorkerBrowsers bool            `json:"via_worker_browsers"`
+	YouTubeViaWorker  bool            `json:"youtube_via_worker"` // свежие ролики YouTube через воркер
 	GameMode          string          `json:"game_mode"`
 	Games             []string        `json:"games"`
 	GameList          []strategy.Game `json:"game_profiles"`
@@ -259,6 +260,7 @@ func (d *Daemon) Status() Status {
 		Custom:            d.customNamesLocked(),
 		ViaWorker:         slices.Clone(d.cfg.ViaWorker),
 		ViaWorkerBrowsers: d.cfg.ViaWorkerBrowsers,
+		YouTubeViaWorker:  d.cfg.YouTubeViaWorker,
 		GameMode:          d.cfg.GameMode,
 		Games:             slices.Clone(d.cfg.Games),
 		GameList:          strategy.Games,
@@ -768,6 +770,7 @@ func (d *Daemon) check(ctx context.Context) ([]Service, error) {
 	vpn := diag.InternetVPN()
 	d.mu.Lock()
 	srv := d.tg
+	viaWorker := d.cfg.YouTubeViaWorker && srv != nil && srv.Worker != ""
 	targets := probe.WithYouTubeFallback(probe.WithYouTubeNode(checkTargets(d.cfg.MainSites(), srv != nil), node), fallback)
 	if d.cfg.BrowserQUICOff {
 		targets = dropQUIC(targets)
@@ -792,6 +795,9 @@ func (d *Daemon) check(ctx context.Context) ([]Service, error) {
 			results = mergeRetry(results, d.prober.Run(ctx, failed))
 		case <-ctx.Done():
 		}
+	}
+	if viaWorker {
+		throughWorker(ctx, srv, results)
 	}
 	wg.Wait()
 	if err := ctx.Err(); err != nil {

@@ -88,7 +88,7 @@ func (d *Daemon) telegramStatusLocked() TelegramStatus {
 	}
 	if st.Enabled && st.Worker != "" {
 		st.WorkerOutdated = d.workerVer > 0 && d.workerVer < tgproxy.WorkerVersionWeb
-		if len(d.cfg.ViaWorker) > 0 {
+		if len(d.cfg.ViaWorker) > 0 || d.cfg.YouTubeViaWorker {
 			st.WorkerKeyOK = d.workerKeyOK
 			if d.cfg.ViaWorkerBrowsers && d.web != nil && d.web.Listening() {
 				st.SitesPAC = "http://" + miniAppsAddr(d.cfg.Telegram.Port) + tgproxy.SitesPACPath

@@ -75,7 +75,7 @@ func (d *Daemon) checkWorkerVersion(ctx context.Context, worker string) {
 	if ver < tgproxy.WorkerVersionWeb {
 		d.log.Warn("код воркера устарел — мини-приложения через него не откроются", "worker", worker, "version", ver)
 	}
-	if len(d.cfg.ViaWorker) > 0 {
+	if len(d.cfg.ViaWorker) > 0 || d.cfg.YouTubeViaWorker {
 		key := d.cfg.Telegram.WorkerKey
 		go d.checkWorkerKey(ctx, worker, key)
 	}
@@ -95,9 +95,10 @@ func (d *Daemon) checkWorkerKey(ctx context.Context, worker, key string) {
 	}
 }
 
-// webProxyNeededLocked — нужен ли локальный прокси: для мини-приложений или сайтов через воркер.
+// webProxyNeededLocked — нужен ли локальный прокси: для мини-приложений, сайтов через воркер
+// или свежих роликов YouTube.
 func (d *Daemon) webProxyNeededLocked() bool {
-	return d.cfg.Telegram.MiniApps || len(d.cfg.ViaWorker) > 0
+	return d.cfg.Telegram.MiniApps || len(d.cfg.ViaWorker) > 0 || d.cfg.YouTubeViaWorker
 }
 
 // startMiniAppsLocked запускает локальный прокси (мини-приложения, сайты через воркер) рядом
@@ -107,7 +108,7 @@ func (d *Daemon) startMiniAppsLocked(ctx context.Context, srv *tgproxy.Server) c
 	if !d.webProxyNeededLocked() {
 		return nil
 	}
-	web := &tgproxy.WebProxy{Addr: miniAppsAddr(d.cfg.Telegram.Port), Server: srv, ViaWorker: d.viaWorkerList}
+	web := &tgproxy.WebProxy{Addr: miniAppsAddr(d.cfg.Telegram.Port), Server: srv, ViaWorker: d.viaWorkerList, Fallback: d.fallbackList}
 	d.web = web
 	if worker := d.cfg.Telegram.Worker; worker != "" {
 		go d.checkWorkerVersion(ctx, worker)

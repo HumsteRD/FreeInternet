@@ -229,7 +229,7 @@ var statusText = map[probe.Status]string{
 	probe.QUICFail:    "QUIC не проходит",
 	probe.UDPFail:     "звонки не проходят",
 	probe.HTTPBlocked: "сайт ограничивает доступ",
-	probe.IPBlocked:   "провайдер закрыл сервер по адресу — обход тут бессилен, поможет только VPN",
+	probe.IPBlocked:   "провайдер закрыл сервер по адресу — включите «Свежие ролики через воркер» в настройках или VPN",
 	probe.Failed:      "ошибка соединения",
 }
 

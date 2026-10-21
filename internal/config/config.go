@@ -61,6 +61,9 @@ type Config struct {
 	// ViaWorkerBrowsers — пускать сайты через воркер и в браузерах: для этого FI ставит в Windows
 	// сценарий настройки прокси. Только по явному согласию: это видно в параметрах Windows.
 	ViaWorkerBrowsers bool `json:"via_worker_browsers,omitempty"`
+	// YouTubeViaWorker — видеосерверы YouTube идут через FI: напрямую, а через воркер — когда
+	// провайдер закрыл адрес сервера Google (свежие ролики). Включает и сценарий прокси в браузерах.
+	YouTubeViaWorker bool `json:"youtube_via_worker,omitempty"`
 	// BrowserQUICOff — FI запретил браузерам QUIC (YouTube идёт по TCP); QUICAuto — FI может
 	// сделать это сам, когда QUIC у YouTube не проходит, а стратегии этого не лечат.
 	BrowserQUICOff bool `json:"browser_quic_off,omitempty"`

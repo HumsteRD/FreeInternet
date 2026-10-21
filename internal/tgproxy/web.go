@@ -3,6 +3,7 @@ package tgproxy
 import (
 	"bufio"
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
@@ -86,6 +87,9 @@ type WebProxy struct {
 	// ViaWorker — сайты, которые всегда идут через воркер: их закрыли для России сами сервисы,
 	// и нужен не российский IP. Поддомены входят сами.
 	ViaWorker func() []string
+	// Fallback — сайты, которые идут напрямую, а через воркер — только когда сервер молчит
+	// в ответ на приветствие TLS (провайдер закрыл его адрес): видеосерверы YouTube.
+	Fallback func() []string
 
 	// dialDirect и dialWorker подменяются в тестах.
 	dialDirect func(ctx context.Context, addr string) (net.Conn, error)
@@ -133,6 +137,16 @@ func (p *WebProxy) viaWorker() []string {
 	return p.ViaWorker()
 }
 
+func (p *WebProxy) fallback() []string {
+	if p.Fallback == nil {
+		return nil
+	}
+	return p.Fallback()
+}
+
+// pacSites — всё, что PAC отправляет через FI, кроме сайтов Telegram.
+func (p *WebProxy) pacSites() []string { return append(p.viaWorker(), p.fallback()...) }
+
 func (p *WebProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	isGet := r.Method == http.MethodGet && r.URL.Host == ""
 	switch {
@@ -141,7 +155,7 @@ func (p *WebProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		io.WriteString(w, PAC(p.Addr, p.viaWorker(), ""))
 	case isGet && r.URL.Path == SitesPACPath:
 		w.Header().Set("Content-Type", "application/x-ns-proxy-autoconfig")
-		io.WriteString(w, PAC(p.Addr, p.viaWorker(), r.URL.Query().Get("fallback")))
+		io.WriteString(w, PAC(p.Addr, p.pacSites(), r.URL.Query().Get("fallback")))
 	case r.Method == http.MethodConnect:
 		p.connect(w, r)
 	default:
@@ -153,9 +167,14 @@ func (p *WebProxy) connect(w http.ResponseWriter, r *http.Request) {
 	host, portText, err := net.SplitHostPort(r.Host)
 	port, perr := strconv.Atoi(portText)
 	geo := err == nil && inDomains(host, p.viaWorker()) && !IsTelegramWeb(host)
-	if err != nil || perr != nil || port != 443 || !(IsTelegramWeb(host) || geo) {
+	silent := err == nil && !geo && inDomains(host, p.fallback())
+	if err != nil || perr != nil || port != 443 || !(IsTelegramWeb(host) || geo || silent) {
 		// Чужие сайты сюда не попадают — их PAC отправляет мимо FI. Открытым прокси быть незачем.
 		http.Error(w, "FI: только сайты Telegram и сайты через воркер", http.StatusForbidden)
+		return
+	}
+	if silent {
+		p.connectFallback(w, r, host, port)
 		return
 	}
 	var upstream net.Conn
@@ -186,6 +205,128 @@ func (p *WebProxy) connect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	relay(client, buf.Reader, upstream)
+}
+
+// helloTimeout — сколько ждать от браузера приветствия TLS после CONNECT.
+const helloTimeout = 10 * time.Second
+
+// silentTimeout — сколько ждать ответа сервера на приветствие TLS напрямую. Провайдер может
+// пускать TCP к адресу, но глотать TLS: тогда соединение есть, а ответа нет никогда.
+var silentTimeout = 3 * time.Second
+
+// connectFallback — туннель к сайту из Fallback: напрямую, а если сервер молчит в ответ на
+// приветствие TLS — то же приветствие уходит через воркер. Браузер видит только задержку.
+func (p *WebProxy) connectFallback(w http.ResponseWriter, r *http.Request, host string, port int) {
+	hj, ok := w.(http.Hijacker)
+	if !ok {
+		http.Error(w, "нет перехвата соединения", http.StatusInternalServerError)
+		return
+	}
+	client, buf, err := hj.Hijack()
+	if err != nil {
+		return
+	}
+	defer client.Close()
+	if _, err := io.WriteString(client, "HTTP/1.1 200 Connection Established\r\n\r\n"); err != nil {
+		return
+	}
+	client.SetReadDeadline(time.Now().Add(helloTimeout))
+	hello, err := readTLSRecord(buf.Reader)
+	client.SetReadDeadline(time.Time{})
+	if err != nil {
+		return
+	}
+	upstream, answer, err := p.dialAnswering(r.Context(), host, port, hello)
+	if err != nil {
+		p.logf("%s недоступен: %v", host, err)
+		return
+	}
+	defer upstream.Close()
+	if _, err := client.Write(answer); err != nil {
+		return
+	}
+	relay(client, buf.Reader, upstream)
+}
+
+// readTLSRecord читает первую запись TLS (приветствие клиента) целиком: браузеры с длинным
+// приветствием (ключи ML-KEM) отправляют его двумя пакетами, и сервер ответит только на всё.
+func readTLSRecord(r *bufio.Reader) ([]byte, error) {
+	hdr := make([]byte, 5)
+	if _, err := io.ReadFull(r, hdr); err != nil {
+		return nil, err
+	}
+	if hdr[0] != 0x16 { // не TLS — отдаём как есть, сервер ответит или нет
+		return hdr, nil
+	}
+	n := int(hdr[3])<<8 | int(hdr[4])
+	if n > 1<<14+2048 {
+		return nil, fmt.Errorf("запись TLS длиной %d", n)
+	}
+	rec := make([]byte, 5+n)
+	copy(rec, hdr)
+	if _, err := io.ReadFull(r, rec[5:]); err != nil {
+		return nil, err
+	}
+	return rec, nil
+}
+
+// dialAnswering отправляет приветствие напрямую и ждёт первых байт ответа; если сервер молчит
+// или адрес закрыт, отправляет приветствие через воркер. answer — уже полученные байты ответа.
+func (p *WebProxy) dialAnswering(ctx context.Context, host string, port int, hello []byte) (conn net.Conn, answer []byte, err error) {
+	var errs []error
+	if !p.directBlocked(host) {
+		dctx, cancel := context.WithTimeout(ctx, webDirectTimeout)
+		conn, err = p.direct(dctx, net.JoinHostPort(host, strconv.Itoa(port)))
+		cancel()
+		if err == nil {
+			if answer, err = firstAnswer(conn, hello, silentTimeout); err == nil {
+				return conn, answer, nil
+			}
+			conn.Close()
+		}
+		errs = append(errs, fmt.Errorf("напрямую: %w", err))
+		p.markBlocked(host)
+	}
+	if conn, err = p.workerOnly(ctx, host, port); err != nil {
+		return nil, nil, errors.Join(append(errs, err)...)
+	}
+	if _, err := conn.Write(hello); err != nil {
+		conn.Close()
+		return nil, nil, err
+	}
+	return conn, nil, nil
+}
+
+// firstAnswer отправляет данные и ждёт первых байт ответа не дольше wait.
+func firstAnswer(conn net.Conn, data []byte, wait time.Duration) ([]byte, error) {
+	conn.SetDeadline(time.Now().Add(wait))
+	defer conn.SetDeadline(time.Time{})
+	if _, err := conn.Write(data); err != nil {
+		return nil, err
+	}
+	buf := make([]byte, 32<<10)
+	n, err := conn.Read(buf)
+	if n > 0 {
+		return buf[:n], nil
+	}
+	if err == nil {
+		err = io.ErrNoProgress
+	}
+	return nil, fmt.Errorf("сервер молчит: %w", err)
+}
+
+// WorkerTLS проверяет, что сайт открывается через воркер: рукопожатие TLS до него.
+func (s *Server) WorkerTLS(ctx context.Context, host string) error {
+	conn, err := s.dialWorkerTCP(ctx, host, 443)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	tc := tls.Client(conn, &tls.Config{ServerName: host})
+	if dl, ok := ctx.Deadline(); ok {
+		tc.SetDeadline(dl)
+	}
+	return tc.HandshakeContext(ctx)
 }
 
 // dial открывает TCP до сайта Telegram: напрямую, а если адрес закрыт — через воркер.
