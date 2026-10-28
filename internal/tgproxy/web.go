@@ -185,7 +185,9 @@ func (p *WebProxy) connect(w http.ResponseWriter, r *http.Request) {
 		upstream, err = p.dial(r.Context(), host, port)
 	}
 	if err != nil {
-		p.logf("%s недоступен: %v", host, err)
+		if r.Context().Err() == nil { // браузер сам закрыл вкладку — это не сбой
+			p.logf("%s недоступен: %v", host, err)
+		}
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
@@ -238,7 +240,9 @@ func (p *WebProxy) connectFallback(w http.ResponseWriter, r *http.Request, host 
 	}
 	upstream, answer, err := p.dialAnswering(r.Context(), host, port, hello)
 	if err != nil {
-		p.logf("%s недоступен: %v", host, err)
+		if r.Context().Err() == nil { // браузер сам закрыл вкладку — это не сбой
+			p.logf("%s недоступен: %v", host, err)
+		}
 		return
 	}
 	defer upstream.Close()

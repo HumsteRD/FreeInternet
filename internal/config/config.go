@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"slices"
+	"strings"
 	"time"
 
 	"fi/internal/lists"
@@ -133,7 +134,20 @@ func Load(path string) (Config, error) {
 	if time.Duration(c.CheckEvery) == oldCheckEvery {
 		c.CheckEvery = Duration(DefaultCheckEvery)
 	}
+	c.ViaWorker = slices.DeleteFunc(c.ViaWorker, NotViaWorker)
 	return c, nil
+}
+
+// notViaWorker — сайты, которые через воркер не пускаются. YouTube не закрыт для России самим
+// сервисом, а через воркер видит страну, куда тот выходит (часто Гонконг), и YouTube Music
+// пишет «недоступен в вашем регионе». Для свежих роликов есть YouTubeViaWorker: через воркер
+// идут только видеосерверы, которые провайдер закрыл.
+var notViaWorker = []string{"youtube.com", "youtu.be", "youtube-nocookie.com", "googlevideo.com", "ytimg.com", "ggpht.com", "google.com", "googleapis.com"}
+
+// NotViaWorker — сайт (или его поддомен) нельзя пускать через воркер.
+func NotViaWorker(host string) bool {
+	host = strings.ToLower(strings.TrimSuffix(host, "."))
+	return slices.ContainsFunc(notViaWorker, func(d string) bool { return host == d || strings.HasSuffix(host, "."+d) })
 }
 
 // Save записывает настройки через временный файл, чтобы сбой не оставил их обрезанными.

@@ -21,12 +21,7 @@ func SyncSystemPAC(base string) error {
 	}
 	defer k.Close()
 	cur, _, _ := k.GetStringValue("AutoConfigURL")
-	manual := ""
-	if on, _, err := k.GetIntegerValue("ProxyEnable"); err == nil && on != 0 {
-		server, _, _ := k.GetStringValue("ProxyServer")
-		manual = parseProxyServer(server)
-	}
-	want, action := nextPAC(cur, base, manual)
+	want, action := nextPAC(cur, base, manualProxy(k))
 	switch action {
 	case pacForeign:
 		return ErrForeignPAC
@@ -41,15 +36,25 @@ func SyncSystemPAC(base string) error {
 	return err
 }
 
-// CurrentPAC — сценарий настройки прокси, заданный в Windows сейчас.
-func CurrentPAC() string {
+// CurrentPAC — сценарий настройки прокси и включённый вручную прокси (обычно VPN-клиента),
+// заданные в Windows сейчас.
+func CurrentPAC() (pac, manual string) {
 	k, err := registry.OpenKey(registry.CURRENT_USER, internetSettingsKey, registry.QUERY_VALUE)
 	if err != nil {
-		return ""
+		return "", ""
 	}
 	defer k.Close()
-	v, _, _ := k.GetStringValue("AutoConfigURL")
-	return v
+	pac, _, _ = k.GetStringValue("AutoConfigURL")
+	return pac, manualProxy(k)
+}
+
+// manualProxy — адрес прокси, включённого вручную; пусто — выключен или не разобрать.
+func manualProxy(k registry.Key) string {
+	if on, _, err := k.GetIntegerValue("ProxyEnable"); err != nil || on == 0 {
+		return ""
+	}
+	server, _, _ := k.GetStringValue("ProxyServer")
+	return parseProxyServer(server)
 }
 
 // RemoveSystemPAC убирает PAC FI — при удалении программы.

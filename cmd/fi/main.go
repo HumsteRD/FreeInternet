@@ -188,6 +188,7 @@ type tray struct {
 	notified  map[string]time.Time // только из watch
 	alerts    serviceAlerts        // только из watch
 	pacErr    string               // только из watch: последняя ошибка системного PAC, чтобы не повторять в журнале
+	pacGone   int                  // только из watch: опросов подряд, где PAC FI пропал без прокси VPN
 	exe       string               // свой файл: если установщик его заменил, окно перезапускается
 	exeTime   time.Time
 

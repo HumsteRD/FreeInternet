@@ -9,6 +9,7 @@ import (
 	"slices"
 	"time"
 
+	"fi/internal/config"
 	"fi/internal/probe"
 	"fi/internal/tgproxy"
 )
@@ -46,6 +47,9 @@ func (d *Daemon) AddViaWorker(input string) error {
 	}
 	if tgproxy.IsTelegramWeb(host) {
 		return fmt.Errorf("%s — сайт Telegram, он и так идёт через FI (мини-приложения)", host)
+	}
+	if config.NotViaWorker(host) {
+		return fmt.Errorf("%s через воркер не пускаем: YouTube и Google увидят страну воркера, и YouTube Music станет «недоступен в вашем регионе». Для видео включите «Свежие ролики YouTube через воркер» ниже", host)
 	}
 	d.mu.Lock()
 	restart := !d.webProxyNeededLocked() && d.cfg.Telegram.Enabled

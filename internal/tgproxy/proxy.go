@@ -96,6 +96,10 @@ type Server struct {
 	pool     *pool
 	failed   map[string]time.Time
 	dnsCache map[string]dnsEntry
+	// lastGood — адреса из последнего удачного поиска; смена сети их не стирает. Сразу после
+	// включения или выключения VPN DNS несколько секунд молчит, а воркер Cloudflare и сайты
+	// Telegram живут на тех же адресах — без запаса прокси терял воркер («адрес не найден»).
+	lastGood map[string][]string
 	logged   map[string]*logEntry  // когда какая ошибка попала в журнал
 	active   map[upstream]struct{} // соединения с Telegram, через которые сейчас идут данные
 
@@ -109,13 +113,14 @@ type Server struct {
 }
 
 type dnsEntry struct {
-	ips []string
-	at  time.Time
+	ips   []string
+	at    time.Time
+	stale bool // DNS не ответил — это адреса из прошлого удачного поиска
 }
 
-// ttl — сколько верить записи: неудачный поиск быстро повторяется.
+// ttl — сколько верить записи: неудачный поиск и старые адреса быстро перепроверяются.
 func (e dnsEntry) ttl() time.Duration {
-	if len(e.ips) == 0 {
+	if len(e.ips) == 0 || e.stale {
 		return dnsFailTTL
 	}
 	return dnsCacheTTL
@@ -725,6 +730,15 @@ func (s *Server) resolve(ctx context.Context, host string, dc int) []string {
 		s.mu.Lock()
 		if s.dnsCache == nil {
 			s.dnsCache = map[string]dnsEntry{}
+		}
+		if s.lastGood == nil {
+			s.lastGood = map[string][]string{}
+		}
+		switch {
+		case len(entry.ips) > 0:
+			s.lastGood[host] = entry.ips
+		case len(s.lastGood[host]) > 0:
+			entry.ips, entry.stale = s.lastGood[host], true
 		}
 		s.dnsCache[host] = entry
 		s.mu.Unlock()

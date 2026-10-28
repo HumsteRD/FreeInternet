@@ -846,7 +846,7 @@ function viaWorkerSection(st) {
           <button class="toggle ${st.youtube_via_worker ? 'on' : ''}" role="switch" aria-checked="${Boolean(st.youtube_via_worker)}" aria-label="Свежие ролики YouTube через воркер" data-action="youtube-via-worker" ${!tg.enabled || !tg.worker ? 'disabled' : ''}></button>
         </div>
         <div class="settings-row">
-          <span class="row-text"><span class="row-title-sm">Применять в браузерах</span><span class="row-sub wrap">FI поставит в Windows сценарий настройки прокси (Параметры → Сеть и Интернет → Прокси-сервер): через FI пойдут только сайты из списка и видеосерверы YouTube, если они включены выше, остальное — напрямую. Выключите здесь или уберите сценарий в Windows — FI его больше не поставит.</span></span>
+          <span class="row-text"><span class="row-title-sm">Применять в браузерах</span><span class="row-sub wrap">FI поставит в Windows сценарий настройки прокси (Параметры → Сеть и Интернет → Прокси-сервер): через FI пойдут только сайты из списка и видеосерверы YouTube, если они включены выше, остальное — напрямую. Пока VPN (например Happ) держит свой системный прокси, браузеры ведёт он, а FI вернёт сценарий, когда VPN выключат. Выключите здесь или уберите сценарий в Windows сами — FI его больше не поставит.</span></span>
           <button class="toggle ${st.via_worker_browsers ? 'on' : ''}" role="switch" aria-checked="${Boolean(st.via_worker_browsers)}" aria-label="Применять в браузерах" data-action="via-worker-browsers" ${!sites.length && !st.youtube_via_worker ? 'disabled' : ''}></button>
         </div>
       </div>

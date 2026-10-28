@@ -20,6 +20,18 @@ func TestOldCheckIntervalMigrates(t *testing.T) {
 	}
 }
 
+func TestYouTubeLeavesViaWorker(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	os.WriteFile(path, []byte(`{"via_worker":["soundcloud.com","youtube.com","music.youtube.com","sndcdn.com"]}`), 0o644)
+	c, err := Load(path)
+	if err != nil || len(c.ViaWorker) != 2 || c.ViaWorker[0] != "soundcloud.com" || c.ViaWorker[1] != "sndcdn.com" {
+		t.Fatalf("YouTube через воркером ломает YouTube Music — его надо убрать из списка: %v %v", c.ViaWorker, err)
+	}
+	if NotViaWorker("notyoutube.com") || !NotViaWorker("WWW.YouTube.com.") {
+		t.Fatal("NotViaWorker: домен и поддомены — да, похожие имена — нет")
+	}
+}
+
 func TestLoadCorruptKeepsCopy(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
 	broken := []byte(`{"sites":[{"host":"rutracker.org"}`)

@@ -1,14 +1,15 @@
 package winsvc
 
 import (
-	"net/url"
 	"regexp"
 	"strings"
 )
 
-// Системный PAC — для сайтов через воркер в браузерах. FI ставит AutoConfigURL пользователя
-// на свой файл PAC; прокси, заданный до этого вручную (например VPN-клиентом в режиме системного
-// прокси), передаётся в PAC как запасной для остальных сайтов, чтобы VPN продолжал работать.
+// Системный PAC — для сайтов через воркер и видеосерверов YouTube в браузерах. FI ставит
+// AutoConfigURL пользователя на свой файл PAC. Когда VPN-клиент включает системный прокси
+// (Happ: 127.0.0.1:10809), браузеры ведёт он — FI убирает свой PAC и не спорит с ним: через VPN
+// и YouTube, и закрытые для России сайты идут быстрее, чем через воркер. VPN выключили — PAC
+// возвращается.
 
 // pacAction — что сделать с AutoConfigURL.
 type pacAction int
@@ -53,10 +54,11 @@ func parseProxyServer(s string) string {
 	return http
 }
 
-// nextPAC решает, каким должен быть AutoConfigURL. base — PAC службы (пусто — сайтов через
-// воркер нет), manual — прокси, заданный вручную.
+// nextPAC решает, каким должен быть AutoConfigURL. base — PAC службы (пусто — через FI в браузерах
+// ничего не идёт), manual — прокси, заданный вручную (обычно VPN-клиентом).
 func nextPAC(cur, base, manual string) (string, pacAction) {
-	if base == "" {
+	vpn := manual != "" && !strings.HasPrefix(base, "http://"+manual+"/") // свой же прокси — не VPN
+	if base == "" || vpn {
 		if IsOurSitesPAC(cur) {
 			return "", pacRemove
 		}
@@ -65,12 +67,11 @@ func nextPAC(cur, base, manual string) (string, pacAction) {
 	if cur != "" && !IsOurSitesPAC(cur) {
 		return cur, pacForeign
 	}
-	want := base
-	if manual != "" && !strings.HasPrefix(base, "http://"+manual+"/") { // свой же прокси запасным не годится
-		want += "?fallback=" + url.QueryEscape(manual)
-	}
-	if want == cur {
+	if cur == base {
 		return cur, pacKeep
 	}
-	return want, pacSet
+	return base, pacSet
 }
+
+// UserRemovedPAC — PAC FI пропал, и на его место не встал прокси VPN-клиента: его убрал человек.
+func UserRemovedPAC(cur, manual string) bool { return !IsOurSitesPAC(cur) && manual == "" }
