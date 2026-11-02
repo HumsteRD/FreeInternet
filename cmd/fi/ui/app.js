@@ -440,7 +440,7 @@ function siteView(st) {
     .map((site) => {
       const related = sites.filter((c) => c.parent === site.host).map((c) => c.host);
       const subs = [
-        site.note ? `<span class="row-sub">Было: ${esc(site.note)}</span>` : '',
+        site.note ? `<span class="row-sub">${site.note.startsWith('набор: ') ? esc(site.note[0].toUpperCase() + site.note.slice(1)) : `Было: ${esc(site.note)}`}</span>` : '',
         related.length ? `<span class="row-sub wrap">Вместе с ним: <span class="mono">${esc(related.join(', '))}</span></span>` : '',
       ].join('');
       return `<div class="row site-row">

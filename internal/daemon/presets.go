@@ -3,15 +3,15 @@ package daemon
 import (
 	"fmt"
 	"slices"
-	"strings"
 	"time"
 
 	"fi/internal/config"
 )
 
 // Готовые наборы сайтов: чтобы не вписывать домены по одному. Первый домен набора — главный:
-// его проверяет FI, он виден в списке, остальные лежат под ним. Сайт, который человек добавил
-// сам, при выключении набора остаётся.
+// его проверяет FI, он виден в списке, остальные лежат под ним. Домены набора помечены его
+// именем, и выключение убирает только их: сайт, который человек добавил сам, остаётся, даже
+// если его домены совпали с набором.
 
 // Preset — набор сайтов.
 type Preset struct {
@@ -35,8 +35,8 @@ var presets = []Preset{
 		"facebook.com", "fbcdn.net", "threads.net",
 		"linkedin.com", "licdn.com",
 	}},
-	{ID: "torrents", Title: "Торренты", Sub: "RuTracker, NNM-Club, Rutor, Kinozal", Hosts: []string{
-		"rutracker.org", "rutracker.net", "rutracker.cc", "nnmclub.to", "rutor.info", "kinozal.tv",
+	{ID: "torrents", Title: "Торренты", Sub: "RuTracker, NNM-Club", Hosts: []string{
+		"rutracker.org", "rutracker.net", "rutracker.cc", "nnmclub.to",
 	}},
 	{ID: "video", Title: "Видео и стримы", Sub: "Twitch, Kick, Vimeo, Dailymotion", Hosts: []string{
 		"twitch.tv", "ttvnw.net", "jtvnw.net", "kick.com", "vimeo.com", "vimeocdn.com", "dailymotion.com",
@@ -74,20 +74,19 @@ func (d *Daemon) SetPreset(id string, on bool) error {
 		return fmt.Errorf("неизвестный набор сайтов %q", id)
 	}
 	p := presets[i]
-	main := p.Hosts[0]
+	main, note := p.Hosts[0], presetNote+p.Title
 	d.mu.Lock()
 	now := time.Now()
 	if on {
-		d.cfg.AddSite(config.Site{Host: main, Added: now, Note: presetNote + p.Title})
+		d.cfg.AddSite(config.Site{Host: main, Added: now, Note: note})
 		for _, h := range p.Hosts[1:] {
-			d.cfg.AddSite(config.Site{Host: h, Added: now, Parent: main})
+			d.cfg.AddSite(config.Site{Host: h, Added: now, Parent: main, Note: note})
 		}
 	} else {
+		// Главный домен уходит вместе с набором — то, что FI нашёл ради него, тоже.
+		ours := slices.ContainsFunc(d.cfg.Sites, func(s config.Site) bool { return s.Host == main && s.Note == note })
 		d.cfg.Sites = slices.DeleteFunc(d.cfg.Sites, func(s config.Site) bool {
-			if s.Host == main {
-				return strings.HasPrefix(s.Note, presetNote)
-			}
-			return s.Parent == main && slices.Contains(p.Hosts, s.Host)
+			return s.Note == note || (ours && s.Parent == main)
 		})
 	}
 	err := d.saveSitesLocked()

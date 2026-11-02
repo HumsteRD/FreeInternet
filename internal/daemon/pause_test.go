@@ -119,6 +119,25 @@ func TestPresets(t *testing.T) {
 		t.Fatal("набор выключен")
 	}
 
+	// twitch.tv и его домены добавил человек, а набор их тоже содержит: они должны остаться.
+	d.cfg.Sites = nil
+	d.cfg.AddSite(config.Site{Host: "twitch.tv"})
+	d.cfg.AddSite(config.Site{Host: "ttvnw.net", Parent: "twitch.tv"})
+	d.cfg.AddSite(config.Site{Host: "jtvnw.net", Parent: "twitch.tv"})
+	if err := d.SetPreset("video", true); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.SetPreset("video", false); err != nil {
+		t.Fatal(err)
+	}
+	var left []string
+	for _, s := range d.cfg.Sites {
+		left = append(left, s.Host)
+	}
+	if !slices.Equal(left, []string{"twitch.tv", "ttvnw.net", "jtvnw.net"}) {
+		t.Fatalf("выключение набора должно убрать только его домены, а осталось: %v", left)
+	}
+
 	// Каждый набор — настоящие домены: их примет проверка адресов.
 	for _, p := range presets {
 		if len(p.Hosts) == 0 || p.Sub == "" {

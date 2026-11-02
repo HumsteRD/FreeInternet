@@ -1,2 +1,4 @@
 # Исходники хранятся и выдаются с LF на любой системе
 * text=auto eol=lf
+# cmd.exe надёжно читает .bat только с CRLF: конфиги FI подходят и для папки Flowseal
+*.bat text eol=crlf
