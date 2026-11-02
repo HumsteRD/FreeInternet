@@ -29,6 +29,9 @@ const (
 // с ClientHello Go и браузера. ALPN сужен до http/1.1, чтобы говорить HTTP вручную.
 func (p *Prober) dialTLS(ctx context.Context, host, addr string) (*utls.UConn, error) {
 	d := net.Dialer{Timeout: p.ConnectTimeout}
+	if p.localIP != nil {
+		d.LocalAddr = &net.TCPAddr{IP: p.localIP}
+	}
 	raw, err := d.DialContext(ctx, "tcp4", addr)
 	if err != nil {
 		return nil, &stageError{TCPFail, err}

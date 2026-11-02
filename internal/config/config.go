@@ -71,6 +71,8 @@ type Config struct {
 	QUICAuto       bool `json:"quic_auto"`
 	// PublicDNS — FI переключил обычный адаптер на публичный DNS, потому что DNS роутера молчал.
 	PublicDNS bool `json:"public_dns,omitempty"`
+	// PausedUntil — обход на паузе: в это время он включится сам.
+	PausedUntil time.Time `json:"paused_until,omitzero"`
 }
 
 // Telegram — встроенный прокси для Telegram Desktop.

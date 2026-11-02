@@ -151,6 +151,8 @@ func main() {
 		}()
 	})
 	t.pauseItem = t.menu.Add("Приостановить обход").OnClick(func(*application.Context) { go t.toggleEnabled() })
+	t.menu.Add("Пауза на 15 минут").OnClick(func(*application.Context) { go t.command("pause", map[string]int{"minutes": 15}) })
+	t.menu.Add("Пауза на час").OnClick(func(*application.Context) { go t.command("pause", map[string]int{"minutes": 60}) })
 	t.menu.AddSeparator()
 	t.menu.Add("Выход").OnClick(func(*application.Context) { t.app.Quit() })
 
@@ -200,6 +202,8 @@ type tray struct {
 // status — поля статуса службы, которые нужны значку, меню и уведомлениям.
 type status struct {
 	Enabled   bool   `json:"enabled"`
+	Running   bool   `json:"running"`
+	Paused    string `json:"paused_until"`
 	AutoFix   bool   `json:"auto_fix"`
 	Strategy  string `json:"strategy"`
 	Error     string `json:"error"`
@@ -361,6 +365,12 @@ func (t *tray) notifyChanges(prev, cur *status) {
 	}
 	if cur.AntiCheat != "" && prev.AntiCheat == "" {
 		t.notify("Игра с античитом "+cur.AntiCheat, "Обход работает, но FI не будет перезапускать его до выхода из игры.")
+	}
+	if cur.AntiCheat != "" && prev.AntiCheat != "" && prev.Running && !cur.Running && cur.Enabled {
+		t.notify("Обход выключен до конца игры", "Античит заклинил драйвер обхода, и интернет вставал. Без обхода он работает, а после игры FI включит обход сам.")
+	}
+	if prev.Paused != "" && cur.Paused == "" && cur.Enabled {
+		t.notify("Обход снова включён", "Пауза закончилась.")
 	}
 	if cur.App.UpdateAvailable && !cur.App.Configured && cur.App.Latest != prev.App.Latest {
 		t.notify("Вышла FI "+cur.App.Latest, "Откройте FI → Настройки, чтобы скачать новую версию.")

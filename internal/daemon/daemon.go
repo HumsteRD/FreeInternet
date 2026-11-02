@@ -73,6 +73,9 @@ type Status struct {
 	// ViaWorkerBrowsers — FI ставит в Windows сценарий прокси, чтобы сайты через воркер шли и в браузерах.
 	ViaWorkerBrowsers bool            `json:"via_worker_browsers"`
 	YouTubeViaWorker  bool            `json:"youtube_via_worker"` // свежие ролики YouTube через воркер
+	Ipset             lists.IpsetMode `json:"ipset"`
+	PausedUntil       time.Time       `json:"paused_until,omitzero"` // обход на паузе: когда включится сам
+	Presets           []PresetStatus  `json:"presets"`
 	GameMode          string          `json:"game_mode"`
 	Games             []string        `json:"games"`
 	GameList          []strategy.Game `json:"game_profiles"`
@@ -264,6 +267,9 @@ func (d *Daemon) Status() Status {
 		ViaWorker:         slices.Clone(d.cfg.ViaWorker),
 		ViaWorkerBrowsers: d.cfg.ViaWorkerBrowsers,
 		YouTubeViaWorker:  d.cfg.YouTubeViaWorker,
+		Ipset:             d.cfg.Ipset,
+		PausedUntil:       d.cfg.PausedUntil,
+		Presets:           d.presetStatusLocked(),
 		GameMode:          d.cfg.GameMode,
 		Games:             slices.Clone(d.cfg.Games),
 		GameList:          strategy.Games,
@@ -298,14 +304,23 @@ func (d *Daemon) Status() Status {
 	return st
 }
 
-// SetEnabled включает или выключает обход.
+// SetEnabled включает или выключает обход и отменяет паузу. Включить во время игры с античитом
+// нельзя: запуск застрял бы в драйвере WinDivert. Выключить можно всегда.
 func (d *Daemon) SetEnabled(on bool) error {
+	d.mu.Lock()
+	running := d.proc != nil
+	d.mu.Unlock()
+	if on && !running {
+		if err := restartAllowed(); err != nil {
+			return err
+		}
+	}
 	d.mu.Lock()
 	if d.task != nil && d.task.Kind == "select" {
 		d.mu.Unlock()
 		return ErrBusy
 	}
-	d.cfg.Enabled = on
+	d.cfg.Enabled, d.cfg.PausedUntil = on, time.Time{}
 	err := d.saveLocked()
 	d.mu.Unlock()
 	if err != nil {
@@ -497,6 +512,7 @@ func (d *Daemon) watchVPN(ctx context.Context) {
 		} else if ac != "" {
 			d.guardGame(ctx, ac)
 		}
+		d.resumeIfDue(lastAC != "")
 		vpn, physical := netRoute()
 		changed := vpn != last
 		if changed {
@@ -955,6 +971,11 @@ func (d *Daemon) periodicCheck(ctx context.Context) (soon bool) {
 				defer func() { soon = true }() // сбой winws: пробуем снова через пару минут, а не через 15
 			}
 		}
+	}
+	// Во время игры полная проверка только шумит в сети: подбор всё равно запрещён, а за самим
+	// интернетом следит guardGame.
+	if inGame {
+		return false
 	}
 
 	// Через VPN проверки видят его сеть, а не провайдера: сервисы, которые VPN не пропускает,

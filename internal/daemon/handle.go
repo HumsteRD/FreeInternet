@@ -27,6 +27,28 @@ func (d *Daemon) Handle(ctx context.Context, method string, params json.RawMessa
 		if err = decode(params, &on); err == nil {
 			err = d.SetEnabled(on.On)
 		}
+	case "pause":
+		var p struct {
+			Minutes int `json:"minutes"`
+		}
+		if err = decode(params, &p); err == nil {
+			err = d.Pause(p.Minutes)
+		}
+	case "set_ipset":
+		var p struct {
+			Mode string `json:"mode"`
+		}
+		if err = decode(params, &p); err == nil {
+			err = d.SetIpset(p.Mode)
+		}
+	case "set_preset":
+		var p struct {
+			ID string `json:"id"`
+			On bool   `json:"on"`
+		}
+		if err = decode(params, &p); err == nil {
+			err = d.SetPreset(p.ID, p.On)
+		}
 	case "check":
 		checkCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 		_, err = d.Check(checkCtx)

@@ -11,6 +11,34 @@ import (
 	"fi/internal/strategy"
 )
 
+func TestBuiltinStrategiesNeedTheirFiles(t *testing.T) {
+	dir := t.TempDir()
+	base := filepath.Join(dir, "base")
+	d := &Daemon{dataDir: dir, log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	d.cfg.BaseDir = base
+	d.baseStrategies = []strategy.Strategy{{Name: "general (ALT)"}}
+	d.rebuildStrategiesLocked()
+	if len(d.strategies) != 1 {
+		t.Fatalf("в наборе нет файлов подделок — конфиги FI не запустятся: %v", strategyNames(d.strategies))
+	}
+
+	// Все файлы, на которые ссылаются конфиги FI, на месте.
+	builtin := strategy.Builtin()
+	for _, s := range builtin {
+		for _, f := range s.CustomFiles() {
+			os.MkdirAll(filepath.Dir(filepath.Join(base, f)), 0o755)
+			os.WriteFile(filepath.Join(base, f), nil, 0o644)
+		}
+	}
+	d.rebuildStrategiesLocked()
+	if len(d.strategies) != 1+len(builtin) || !hasStrategy(d.strategies, "general (FI LIGHT)") {
+		t.Fatalf("конфиги FI должны быть в списке: %v", strategyNames(d.strategies))
+	}
+	if !slices.Equal(strategyNames(d.baseStrategies), []string{"general (ALT)"}) {
+		t.Fatal("конфиги FI не должны попадать в сам набор")
+	}
+}
+
 func TestCustomStrategies(t *testing.T) {
 	dir := t.TempDir()
 	base := filepath.Join(dir, "base")

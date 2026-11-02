@@ -95,7 +95,13 @@ func Call(ctx context.Context, conn net.Conn, method string, params, result any)
 		}
 		req.Params = data
 	}
-	if err := json.NewEncoder(conn).Encode(req); err != nil {
+	// Без перевода строки: декодер службы читает ровно до конца значения, и незабранный байт
+	// держал бы запись в канале без буфера (служба прежней версии).
+	data, err := json.Marshal(req)
+	if err != nil {
+		return err
+	}
+	if _, err := conn.Write(data); err != nil {
 		return err
 	}
 	var resp Response

@@ -310,11 +310,11 @@ func siteActionFor(s probe.Status) siteAction {
 	case probe.TLSReset, probe.TLSTimeout, probe.Freeze16K, probe.ConnReset, probe.QUICFail, probe.Failed:
 		return siteAction{"dpi", "Провайдер мешает соединению — сайт добавлен в список обхода.", true}
 	case probe.DNSSpoof:
-		return siteAction{"dns", "Провайдер подменяет адрес сайта. Поможет защищённый DNS в настройках.", false}
+		return siteAction{"dns", "Провайдер подменяет адрес сайта. Поможет «Публичный DNS» в настройках.", false}
 	case probe.HTTPBlocked:
-		return siteAction{"tunnel", "Сайт сам ограничивает доступ из России. Нужен туннель через другую страну.", false}
+		return siteAction{"tunnel", "Сайт сам ограничивает доступ из России. Добавьте его в «Сайты через воркер» в настройках.", false}
 	case probe.TCPFail:
-		return siteAction{"unreachable", "Сервер не отвечает: он заблокирован по адресу или не работает. Список обхода тут не поможет.", false}
+		return siteAction{"unreachable", "Сервер не отвечает: он заблокирован по адресу или не работает. Обход DPI тут не поможет — попробуйте «Сайты через воркер» в настройках.", false}
 	case probe.DNSFail:
 		return siteAction{"not_found", "Такой сайт не найден. Проверьте адрес.", false}
 	case probe.TLSCert:

@@ -229,6 +229,9 @@ function view() {
   }
 }
 
+// clockText — время суток: «14:30».
+const clockText = (iso) => new Date(iso).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
+
 function heroView(st) {
   const task = st.task;
   let title;
@@ -247,6 +250,9 @@ function heroView(st) {
     title = 'Обновляем набор стратегий';
     sub = esc(task.current || '');
     taskRow = `<div class="hero-task">${progress(task.done, task.total)}</div>`;
+  } else if (!st.enabled && st.paused_until) {
+    title = 'Обход на паузе';
+    sub = `Включится сам в ${esc(clockText(st.paused_until))}`;
   } else if (st.error) {
     title = st.enabled ? 'Обход не работает' : 'Обход выключен';
     sub = esc(st.error);
@@ -332,7 +338,11 @@ function mainView(st) {
     ? `<section class="panel notice warn">${icon('globe', 16)}<span>DNS роутера или провайдера не отвечает — браузер может не открывать сайты (YouTube и другие), хотя проверки FI проходят: FI ищет адреса в обход него. <button class="btn sm" data-action="public-dns">Использовать публичный DNS</button></span></section>`
     : '';
   const game = st.anti_cheat
-    ? `<section class="panel notice">${icon('play', 16)}<span>Идёт игра с античитом ${esc(st.anti_cheat)}. Обход работает, но FI не перезапускает его до выхода из игры: иначе античит заблокирует драйвер до перезагрузки.</span></section>`
+    ? `<section class="panel notice">${icon('play', 16)}<span>Идёт игра с античитом ${esc(st.anti_cheat)}. ${
+        st.running
+          ? 'Обход работает, но FI не перезапускает его до выхода из игры: иначе античит заблокирует драйвер до перезагрузки.'
+          : 'Обход выключен и не запустится, пока идёт игра: иначе античит заблокирует драйвер до перезагрузки. После игры FI включит его сам.'
+      }</span></section>`
     : '';
   return `${heroView(st)}
     ${dns}
@@ -440,6 +450,15 @@ function siteView(st) {
     })
     .join('');
 
+  const presets = (st.presets ?? [])
+    .map(
+      (p) => `<div class="settings-row">
+        <span class="row-text"><span class="row-title-sm">${esc(p.title)}</span><span class="row-sub wrap">${esc(p.sub)}</span></span>
+        <button class="toggle ${p.on ? 'on' : ''}" role="switch" aria-checked="${Boolean(p.on)}" aria-label="${esc(p.title)}" data-action="preset" data-id="${esc(p.id)}" data-on="${p.on ? '' : '1'}"></button>
+      </div>`,
+    )
+    .join('');
+
   return `${subHeader('Добавить сайт')}
     <form class="stack" data-form="site" novalidate>
       <label class="input ${s.error ? 'is-error' : ''}">
@@ -451,6 +470,14 @@ function siteView(st) {
       <button class="btn primary full" type="submit" ${s.busy || st.task ? 'disabled' : ''}>${s.busy ? `${spinner()}<span>Проверяем сайт…</span>` : '<span>Проверить и добавить</span>'}</button>
     </form>
     ${result}
+    ${
+      presets
+        ? `<section class="stack">
+      <div class="section-label"><span>Готовые наборы</span></div>
+      <div class="panel">${presets}</div>
+    </section>`
+        : ''
+    }
     <section class="stack">
       <div class="section-label"><span>Ваши сайты</span><span>${main.length || ''}</span></div>
       <div class="panel">${rows || '<p class="empty">Пока пусто. Добавьте сайт, который не открывается.</p>'}</div>
@@ -638,6 +665,13 @@ function settingsView(st) {
       tcp: 'Все порты TCP 1024–65535',
       udp: 'Все порты UDP 1024–65535',
     }[st.game_mode] ?? '';
+  const ipset = st.ipset || 'none';
+  const ipsetSub =
+    {
+      none: 'Только сайты из списков. Подходит почти всем.',
+      loaded: 'Ещё и адреса хостингов из набора (Hetzner, OVH, Cloudflare и другие). Помогает, если сайты обрываются на загрузке, но может мешать другим сайтам на этих хостингах.',
+      any: 'Весь трафик на этих портах, кроме исключений. Крайняя мера: может ломать сайты, которым обход не нужен.',
+    }[ipset] ?? '';
   return `${subHeader('Настройки')}
     ${errorLine()}
     <section class="stack">
@@ -676,6 +710,16 @@ function settingsView(st) {
           <button class="toggle ${st.auto_fix ? 'on' : ''}" role="switch" aria-checked="${st.auto_fix}" aria-label="Чинить автоматически" data-action="auto-fix"></button>
         </div>
         <div class="settings-row column">
+          <span class="row-text"><span class="row-title-sm">Пауза</span><span class="row-sub wrap">${
+            st.paused_until
+              ? `Обход включится сам в ${esc(clockText(st.paused_until))}. Раньше — переключателем на главном экране.`
+              : 'Выключить обход на время, например чтобы зайти в банк. Потом он включится сам.'
+          }</span></span>
+          <div class="button-row">${[[15, '15 минут'], [60, '1 час'], [180, '3 часа']]
+            .map(([minutes, label]) => `<button class="btn sm ghost" data-action="pause" data-minutes="${minutes}" ${selecting ? 'disabled' : ''}>${label}</button>`)
+            .join('')}</div>
+        </div>
+        <div class="settings-row column">
           <span class="row-text"><span class="row-title-sm">Игровой режим</span><span class="row-sub wrap">${gameSub}</span></span>
           <div class="seg" role="radiogroup" aria-label="Игровой режим">${modes
             .map(([value, label]) => `<button role="radio" aria-checked="${st.game_mode === value}" class="${st.game_mode === value ? 'on' : ''}" data-action="game-mode" data-mode="${value}" ${selecting ? 'disabled' : ''}>${label}</button>`)
@@ -683,7 +727,13 @@ function settingsView(st) {
           ${st.game_mode === 'games' ? gameChips(st) : ''}
         </div>
         <div class="settings-row column">
-          <span class="row-text"><span class="row-title-sm">Стратегия</span><span class="row-sub wrap">Подбор проверяет все стратегии набора и оставляет лучшую. Можно выбрать и вручную.</span></span>
+          <span class="row-text"><span class="row-title-sm">Обход по адресам (IPSet)</span><span class="row-sub wrap">${esc(ipsetSub)}</span></span>
+          <div class="seg" role="radiogroup" aria-label="Обход по адресам">${[['none', 'Выкл'], ['loaded', 'Хостинги'], ['any', 'Все адреса']]
+            .map(([value, label]) => `<button role="radio" aria-checked="${ipset === value}" class="${ipset === value ? 'on' : ''}" data-action="ipset" data-mode="${value}" ${selecting ? 'disabled' : ''}>${label}</button>`)
+            .join('')}</div>
+        </div>
+        <div class="settings-row column">
+          <span class="row-text"><span class="row-title-sm">Стратегия</span><span class="row-sub wrap">Подбор проверяет все стратегии и оставляет лучшую. Можно выбрать и вручную. Конфиги FI: STABLE — на каждый день, LIGHT — меньше нагрузки, для игр, HARD — когда другие не проходят, SOCIAL — соцсети и RuTracker без добавления в список.</span></span>
           <div class="input-row">
             <select class="select" id="strategy-select" ${st.task ? 'disabled' : ''}>
               ${(st.strategy_list ?? [])
@@ -1210,6 +1260,15 @@ document.addEventListener('click', (event) => {
       break;
     case 'game-mode':
       command('set_game_mode', { mode: el.dataset.mode });
+      break;
+    case 'ipset':
+      command('set_ipset', { mode: el.dataset.mode });
+      break;
+    case 'pause':
+      command('pause', { minutes: Number(el.dataset.minutes) });
+      break;
+    case 'preset':
+      command('set_preset', { id: el.dataset.id, on: el.dataset.on === '1' });
       break;
     case 'force-site':
       addSite(true);

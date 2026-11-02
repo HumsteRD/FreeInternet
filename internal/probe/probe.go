@@ -25,6 +25,7 @@ type Prober struct {
 	lookup  func(ctx context.Context, host string) (ip string, st Status, detail string)
 	port    string
 	rootCAs *x509.CertPool
+	localIP net.IP // выходить с этого адреса: живые проверки мимо VPN
 }
 
 func New() *Prober {

@@ -57,13 +57,35 @@ func (d *Daemon) saveCustomLocked() error {
 	return os.Rename(path+".tmp", path)
 }
 
-// rebuildStrategiesLocked — стратегии для выбора и подбора: набор и свои. Свои без набора не
-// работают: их файлы подделок и списки — из набора.
+// rebuildStrategiesLocked — стратегии для выбора и подбора: набор, конфиги FI и свои. Без набора
+// конфиги и свои не работают: их файлы подделок и списки — из него.
 func (d *Daemon) rebuildStrategiesLocked() {
 	d.strategies = slices.Clone(d.baseStrategies)
-	if d.baseErr == nil {
-		d.strategies = append(d.strategies, d.custom...)
+	if d.baseErr != nil {
+		return
 	}
+	for _, s := range strategy.Builtin() {
+		if file := d.missingFileLocked(s); file != "" {
+			d.log.Debug("конфиг FI пропущен: в наборе нет файла", "name", s.Name, "file", file)
+			continue
+		}
+		d.strategies = append(d.strategies, s)
+	}
+	d.strategies = append(d.strategies, d.custom...)
+}
+
+// missingFileLocked — файл, на который стратегия ссылается, а в наборе его нет; пусто — все есть.
+func (d *Daemon) missingFileLocked(s strategy.Strategy) string {
+	for _, file := range s.CustomFiles() {
+		// Пользовательские списки FI пишет сам при запуске обхода — в наборе их нет.
+		if name, ok := strings.CutPrefix(file, "lists/"); ok && lists.Generated(name) {
+			continue
+		}
+		if _, err := os.Stat(filepath.Join(d.cfg.BaseDir, filepath.FromSlash(file))); err != nil {
+			return file
+		}
+	}
+	return ""
 }
 
 // AddCustomStrategy проверяет и добавляет свою стратегию. text — содержимое .bat или аргументы winws.
@@ -77,14 +99,8 @@ func (d *Daemon) AddCustomStrategy(name, text string) error {
 	if d.baseErr != nil {
 		return errors.New("сначала установите набор стратегий: свои берут из него файлы подделок и списки")
 	}
-	for _, file := range s.CustomFiles() {
-		// Пользовательские списки FI пишет сам при запуске обхода — в наборе их нет.
-		if name, ok := strings.CutPrefix(file, "lists/"); ok && lists.Generated(name) {
-			continue
-		}
-		if _, err := os.Stat(filepath.Join(d.cfg.BaseDir, filepath.FromSlash(file))); err != nil {
-			return fmt.Errorf("в наборе нет файла %s — стратегия не запустится", file)
-		}
+	if file := d.missingFileLocked(s); file != "" {
+		return fmt.Errorf("в наборе нет файла %s — стратегия не запустится", file)
 	}
 	if hasStrategy(d.baseStrategies, s.Name) {
 		return fmt.Errorf("стратегия %q уже есть", s.Name)
