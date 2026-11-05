@@ -105,6 +105,8 @@ type Server struct {
 
 	workerPausedUntil time.Time // воркер молча закрывал соединения — до этого времени в обход него
 
+	edge edgeState // быстрые входы в Cloudflare
+
 	cfMu      sync.Mutex
 	cfList    []string       // общие домены Cloudflare
 	cfActive  map[int]string // домен, сработавший последним для дата-центра
@@ -321,6 +323,7 @@ func (s *Server) NetworkChanged() {
 	}
 	s.dnsCache, s.failed, s.workerPausedUntil = nil, nil, time.Time{}
 	s.mu.Unlock()
+	s.resetEdges()
 	s.setPreferred("")
 	if p != nil {
 		p.flush()
@@ -609,7 +612,7 @@ func workerPath(k poolKey) string {
 // и перекладывает байты в WebSocket. Границы сообщений ему не важны — соединение потоковое.
 func (s *Server) dialWorker(ctx context.Context, k poolKey) (upstream, error) {
 	var errs []error
-	for _, ip := range s.resolve(ctx, s.Worker, 0) {
+	for _, ip := range s.cfAddrs(ctx, s.Worker, s.edges(s.Worker)) {
 		key := "worker@" + ip
 		if s.coolingDown(key) {
 			continue

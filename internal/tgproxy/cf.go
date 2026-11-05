@@ -183,7 +183,7 @@ func (s *Server) dialCF(ctx context.Context, k poolKey) (upstream, error) {
 
 // dialHost открывает WebSocket к домену по первым его адресам из DNS.
 func (s *Server) dialHost(ctx context.Context, host, path string) (*wsConn, error) {
-	ips := s.resolve(ctx, host, 0)
+	ips := s.cfAddrs(ctx, host, s.edges(s.edgeRef()))
 	if len(ips) == 0 {
 		return nil, fmt.Errorf("%s: адрес не найден", host)
 	}

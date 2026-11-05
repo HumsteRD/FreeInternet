@@ -1116,6 +1116,9 @@ func (d *Daemon) sleep(ctx context.Context, wait time.Duration) bool {
 // StartAutoSelect запускает полный подбор стратегии в фоне; ход виден в Status().Task.
 func (d *Daemon) StartAutoSelect() error { return d.startSelect(false) }
 
+// selectFinalists — сколько лидеров отбора проверять полностью при полном подборе.
+const selectFinalists = 4
+
 // startSelect запускает подбор. Быстрый (quick) проверяет только текущую стратегию и лидеров
 // прошлого полного подбора — интернет прерывается на минуту, а не на несколько. Если лидеров
 // не запомнено, подбор полный.
@@ -1158,7 +1161,9 @@ func (d *Daemon) startSelect(quick bool) error {
 		Ipset:    d.cfg.Ipset,
 		Targets:  d.selectTargetsLocked(),
 		Prober:   d.prober,
-		Heal:     healWinDivert,
+		// Полный подбор — в два этапа: короткий отбор всех стратегий и полная проверка лидеров.
+		Finalists: selectFinalists,
+		Heal:      healWinDivert,
 		// Подбор не дольше нужного: первая стратегия, прошедшая все проверки, и есть лучшая.
 		StopWhenPerfect: true,
 		OnStart: func(i, total int, name string) {

@@ -431,7 +431,7 @@ func (s *Server) dialWorkerTCP(ctx context.Context, host string, port int) (net.
 		path += "&key=" + url.QueryEscape(s.WorkerKey)
 	}
 	var errs []error
-	for _, ip := range s.resolve(ctx, s.Worker, 0) {
+	for _, ip := range s.cfAddrs(ctx, s.Worker, s.edges(s.Worker)) {
 		dialCtx, cancel := context.WithTimeout(ctx, dialTimeout)
 		ws, err := dialWS(dialCtx, net.JoinHostPort(ip, workerPort), s.Worker, path)
 		cancel()

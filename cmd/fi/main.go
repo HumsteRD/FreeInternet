@@ -282,7 +282,9 @@ func (t *tray) show(atTray bool) {
 			t.window.Restore()
 		case !t.window.IsVisible():
 			if atTray {
-				t.systray.ShowWindow()
+				if !placeAtTray(t.window.NativeWindow()) {
+					t.systray.ShowWindow() // запасной путь: расстановка Wails
+				}
 			} else {
 				t.window.Center()
 			}

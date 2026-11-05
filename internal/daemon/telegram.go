@@ -40,6 +40,8 @@ type TelegramStatus struct {
 	WorkerKeyOK *bool `json:"worker_key_ok,omitempty"`
 	// SitesPAC — PAC для браузеров, пока сайты через воркер работают: окно ставит его в Windows.
 	SitesPAC string `json:"sites_pac,omitempty"`
+	// Edge — самый быстрый вход в Cloudflare: «DME · 28 мс» (код дата-центра и пинг).
+	Edge string `json:"edge,omitempty"`
 	tgproxy.Stats
 }
 
@@ -100,6 +102,9 @@ func (d *Daemon) telegramStatusLocked() TelegramStatus {
 	}
 	if d.tg != nil {
 		st.Stats = d.tg.Stats()
+		if edges := d.tg.Edges(); len(edges) > 0 {
+			st.Edge = strings.TrimPrefix(fmt.Sprintf("%s · %d мс", edges[0].Colo, edges[0].RTT.Milliseconds()), " · ")
+		}
 	}
 	return st
 }

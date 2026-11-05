@@ -75,7 +75,13 @@ func openInClient(path, link string) error {
 // traySettings — настройки окна, которые принадлежат пользователю, а не службе.
 type traySettings struct {
 	TelegramClient string `json:"telegram_client,omitempty"` // чем открывать ссылку прокси
-	Theme          string `json:"theme,omitempty"`           // тема окна: dark, gray, light
+	Theme          string `json:"theme,omitempty"`           // тема окна: dark, gray, light, anime…
+	// Оформление сверх темы (themes.go): свой акцентный цвет, шрифт, углы, масштаб, без анимаций.
+	Accent   string `json:"accent,omitempty"`
+	Font     string `json:"font,omitempty"`
+	Radius   string `json:"radius,omitempty"`
+	Scale    int    `json:"scale,omitempty"`
+	NoMotion bool   `json:"no_motion,omitempty"`
 	// SitesPACSet — FI поставил в Windows сценарий прокси для сайтов через воркер. Если сценария
 	// не стало, его убрал человек — возвращать нельзя.
 	SitesPACSet bool `json:"sites_pac_set,omitempty"`

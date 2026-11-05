@@ -91,36 +91,168 @@ const state = {
   worker: null, // домен Cloudflare Worker, пока его правят в поле; null — показываем сохранённый
   tgClients: null, // клиенты Telegram на компьютере (Telegram, AyuGram…); null — ещё не искали
   notice: '', // что получилось: «Отчёт сохранён…»; сбрасывается при переходе между экранами
-  theme: document.documentElement.dataset.theme || 'dark', // dark, gray, light
+  look: null, // оформление: тема, акцент, шрифт, углы, масштаб, анимации (readLook ниже)
 };
 
-const THEMES = [['dark', 'Тёмная'], ['gray', 'Серая'], ['light', 'Светлая']];
+// ─── Оформление ──────────────────────────────────────────────────────────
+// Тема, свой акцентный цвет, шрифт, углы, масштаб и анимации. Хранятся в настройках окна
+// (/app/theme), а копия — в localStorage: index.html применяет её до первой отрисовки.
 
-function applyTheme(theme) {
-  if (!THEMES.some(([value]) => value === theme)) return;
-  state.theme = theme;
-  document.documentElement.dataset.theme = theme;
+const THEMES = [
+  ['dark', 'Тёмная', ['#0B0A0D', '#131116', '#7C4FE0']],
+  ['gray', 'Серая', ['#1E1F22', '#2B2D31', '#7C4FE0']],
+  ['light', 'Светлая', ['#F6F4F8', '#FFFFFF', '#6E3FD8']],
+  ['anime', 'Аниме', ['#1A101F', '#2E1A38', '#FF5FA8']],
+  ['mono', 'Ч/Б', ['#000000', '#171717', '#FFFFFF']],
+  ['neon', 'Неон', ['#070812', '#0D1020', '#00D9F5']],
+  ['forest', 'Лес', ['#0C1410', '#121D17', '#3FB66B']],
+  ['ocean', 'Океан', ['#08111C', '#0E1A28', '#2F8CF0']],
+];
+const ACCENTS = ['#7C4FE0', '#FF5FA8', '#E5484D', '#F59E0B', '#3FB66B', '#00D9F5', '#2F8CF0', '#FFFFFF'];
+const FONTS = [
+  ['', 'Как в теме'],
+  ['onest', 'Onest'],
+  ['segoe', 'Segoe UI'],
+  ['bahnschrift', 'Bahnschrift'],
+  ['mono', 'Моноширинный'],
+  ['georgia', 'С засечками'],
+  ['handwritten', 'Рукописный'],
+];
+const RADII = [['sharp', 'Острые'], ['', 'Обычные'], ['round', 'Круглые']];
+const SCALES = [[90, 'Мельче'], [0, 'Обычный'], [110, 'Крупнее'], [120, 'Ещё крупнее']];
+const DEFAULT_LOOK = { theme: 'dark', accent: '', font: '', radius: '', scale: 0, motion: true };
+
+function readLook() {
   try {
-    localStorage.setItem('fi-theme', theme);
+    return { ...DEFAULT_LOOK, ...JSON.parse(localStorage.getItem('fi-look') || '{}') };
+  } catch {
+    return { ...DEFAULT_LOOK };
+  }
+}
+
+const rgbOf = (hex) => {
+  const n = parseInt(hex.slice(1), 16);
+  return [n >> 16, (n >> 8) & 255, n & 255];
+};
+const mixRGB = (rgb, to, t) => rgb.map((c, i) => Math.round(c + (to[i] - c) * t));
+const hexOf = (rgb) => `#${rgb.map((c) => c.toString(16).padStart(2, '0')).join('')}`;
+
+// accentVars — оттенки акцента для кнопок, меток и рамок; текст на акценте — чёрный или белый.
+function accentVars(hex, light) {
+  const rgb = rgbOf(hex);
+  const lum = (0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2]) / 255;
+  return {
+    '--violet': hex,
+    '--violet-hover': hexOf(mixRGB(rgb, lum > 0.6 ? [0, 0, 0] : [255, 255, 255], 0.12)),
+    '--violet-pressed': hexOf(mixRGB(rgb, [0, 0, 0], 0.18)),
+    '--violet-text': hexOf(light ? mixRGB(rgb, [0, 0, 0], 0.25) : mixRGB(rgb, [255, 255, 255], 0.3)),
+    '--violet-tint': `rgba(${rgb.join(', ')}, 0.14)`,
+    '--violet-line': `rgba(${rgb.join(', ')}, 0.45)`,
+    '--on-accent': lum > 0.6 ? '#000000' : '#FFFFFF',
+  };
+}
+
+function applyLook(look) {
+  const next = { ...DEFAULT_LOOK, ...look };
+  if (!THEMES.some(([id]) => id === next.theme)) next.theme = DEFAULT_LOOK.theme;
+  state.look = next;
+  const root = document.documentElement;
+  root.dataset.theme = next.theme;
+  for (const key of ['font', 'radius']) {
+    if (next[key]) root.dataset[key] = next[key];
+    else delete root.dataset[key];
+  }
+  root.dataset.motion = next.motion ? 'on' : 'off';
+  const vars = accentVars(next.accent || '#000000', next.theme === 'light');
+  for (const name of Object.keys(vars)) {
+    if (next.accent) root.style.setProperty(name, vars[name]);
+    else root.style.removeProperty(name);
+  }
+  scaledTo = ''; // масштаб интерфейса пересчитается
+  try {
+    localStorage.setItem('fi-look', JSON.stringify(next));
   } catch {}
 }
 
-async function loadTheme() {
+async function loadLook() {
   const data = await postJSON('/app/theme');
-  if (data?.theme && data.theme !== state.theme) {
-    applyTheme(data.theme);
+  if (data?.theme) {
+    applyLook(data);
+    applyScale();
     render();
   }
 }
 
-async function setTheme(theme) {
-  applyTheme(theme); // сразу, не дожидаясь ответа
+// setLook меняет оформление сразу, а потом сохраняет его.
+async function setLook(change) {
+  applyLook({ ...state.look, ...change });
+  applyScale();
   render();
-  const data = await postJSON('/app/theme', { theme });
+  const data = await postJSON('/app/theme', change);
   if (data?.error) {
     state.message = data.error;
     render();
   }
+}
+
+const themeLabel = (id) => THEMES.find(([value]) => value === id)?.[1] ?? id;
+
+function lookView() {
+  const l = state.look;
+  const cards = THEMES.map(
+    ([id, label, [bg, panel, accent]]) =>
+      `<button class="theme-card ${l.theme === id ? 'on' : ''}" data-action="look-theme" data-value="${id}" aria-pressed="${l.theme === id}">
+        <span class="theme-preview" style="background:${bg}"><span style="background:${panel}"></span><i style="background:${accent}"></i></span>
+        <span>${label}</span>
+      </button>`,
+  ).join('');
+  const custom = Boolean(l.accent) && !ACCENTS.includes(l.accent.toUpperCase());
+  const swatches = ACCENTS.map(
+    (c) =>
+      `<button class="swatch ${l.accent.toUpperCase() === c ? 'on' : ''}" style="background:${c}" data-action="look-accent" data-value="${c}" aria-label="Цвет ${c}"></button>`,
+  ).join('');
+  const seg = (items, value, action, label) =>
+    `<div class="seg" role="radiogroup" aria-label="${label}">${items
+      .map(([v, text]) => `<button role="radio" aria-checked="${value === v}" class="${value === v ? 'on' : ''}" data-action="${action}" data-value="${v}">${text}</button>`)
+      .join('')}</div>`;
+  return `${subHeader('Оформление')}
+    ${errorLine()}
+    <section class="stack">
+      <div class="section-label"><span>Тема</span></div>
+      <div class="theme-grid">${cards}</div>
+    </section>
+    <section class="stack">
+      <div class="section-label"><span>Акцентный цвет</span></div>
+      <div class="panel"><div class="settings-row column">
+        <div class="swatches">${swatches}<label class="swatch custom ${custom ? 'on' : ''}" title="Свой цвет" style="${custom ? `background:${esc(l.accent)}` : ''}"><input type="color" id="accent-input" value="${esc(l.accent || '#7C4FE0')}" aria-label="Свой цвет"></label></div>
+        <span class="row-sub wrap">Кнопки, переключатели и метки. Последний кружок — свой цвет.</span>
+        <div class="button-row"><button class="btn sm ghost" data-action="look-accent" data-value="" ${l.accent ? '' : 'disabled'}>Цвет темы</button></div>
+      </div></div>
+    </section>
+    <section class="stack">
+      <div class="section-label"><span>Текст и форма</span></div>
+      <div class="panel">
+        <div class="settings-row">
+          <span class="row-text"><span class="row-title-sm">Шрифт</span></span>
+          <select class="select" id="font-select" style="flex: none; width: 160px">${FONTS.map(
+            ([v, text]) => `<option value="${v}" ${l.font === v ? 'selected' : ''}>${text}</option>`,
+          ).join('')}</select>
+        </div>
+        <div class="settings-row column">
+          <span class="row-text"><span class="row-title-sm">Углы</span></span>
+          ${seg(RADII, l.radius, 'look-radius', 'Углы')}
+        </div>
+        <div class="settings-row column">
+          <span class="row-text"><span class="row-title-sm">Размер интерфейса</span></span>
+          ${seg(SCALES, l.scale, 'look-scale', 'Размер интерфейса')}
+        </div>
+        <div class="settings-row">
+          <span class="row-text"><span class="row-title-sm">Анимации</span><span class="row-sub wrap">Плавные переходы, лепестки в теме «Аниме». Не показываются и тогда, когда анимации выключены в Windows.</span></span>
+          <button class="toggle ${l.motion ? 'on' : ''}" role="switch" aria-checked="${l.motion}" aria-label="Анимации" data-action="look-motion"></button>
+        </div>
+      </div>
+    </section>
+    <div class="button-row"><button class="btn sm" data-action="look-reset">Сбросить оформление</button></div>`;
 }
 
 const TITLES = { youtube: 'YouTube', discord: 'Discord', telegram: 'Telegram', calls: 'Звонки', sites: 'Сайты' };
@@ -151,6 +283,7 @@ const VERDICT_BADGE = {
   not_fixed: ['fail', 'Не помогло'],
   dns: ['warn', 'Нужен DNS'],
   tunnel: ['warn', 'Нужен туннель'],
+  via_worker: ['proxy', 'Через воркер'],
   not_found: ['fail', 'Не найден'],
   unreachable: ['fail', 'Не добавлен'],
   cert: ['fail', 'Не добавлен'],
@@ -224,6 +357,8 @@ function view() {
       return diagnoseView(st);
     case 'settings':
       return settingsView(st);
+    case 'look':
+      return lookView();
     default:
       return mainView(st);
   }
@@ -238,9 +373,8 @@ function heroView(st) {
   let sub;
   let taskRow = '';
   if (task?.kind === 'select') {
-    const count = Math.max(0, task.total - 1);
     title = task.quick ? 'Быстрый подбор стратегии' : 'Подбираем стратегию';
-    sub = task.done > 0 ? `Стратегия ${task.done} из ${count} · <span class="mono">${esc(strategyLabel(task.current))}</span>` : 'Проверяем сеть без обхода';
+    sub = task.done > 0 ? `${selectStep(task)} · <span class="mono">${esc(strategyLabel(task.current))}</span>` : 'Проверяем сеть без обхода';
     taskRow = `<div class="hero-task">${progress(task.done, task.total)}<button class="btn ghost sm" data-action="cancel">Отменить</button></div>`;
   } else if (task?.kind === 'app') {
     title = 'Обновляем FI';
@@ -274,6 +408,17 @@ function heroView(st) {
     </div>
     ${taskRow}
   </section>`;
+}
+
+// selectStep — где подбор: «Отбор 5 из 26» (коротко все стратегии) или «Проверка лучших 2 из 4».
+// В быстром подборе отбора нет — тогда просто «Стратегия 2 из 4».
+function selectStep(task) {
+  const steps = Math.max(0, task.total - 1);
+  const n = state.status?.strategies ?? steps;
+  if (steps > n) {
+    return task.done <= n ? `Отбор ${task.done} из ${n}` : `Проверка лучших ${task.done - n} из ${steps - n}`;
+  }
+  return `Стратегия ${task.done} из ${steps}`;
 }
 
 // vpnSelectNotice — предупреждение на экране подбора: через VPN все стратегии выглядят рабочими.
@@ -372,6 +517,7 @@ function setupView(st) {
     const task = st.task?.kind === 'base' ? st.task : null;
     const error = st.base?.error;
     return `<section class="stack onboarding">
+        <span class="mark-anim">${mark(52)}</span>
         <span class="eyebrow">Первый запуск</span>
         <h1 class="display">Скачаем набор стратегий</h1>
         <p class="lead">FI берёт стратегии обхода из проекта zapret-discord-youtube. Архив весит около 1,5 МБ, его подлинность проверяется по опубликованному хешу.</p>
@@ -386,9 +532,10 @@ function setupView(st) {
 
   const n = st.strategies;
   const intro = (verb) => `<section class="stack onboarding">
+      <span class="mark-anim">${mark(52)}</span>
       <span class="eyebrow">Первый запуск</span>
       <h1 class="display">${verb} способ обхода для вашей сети</h1>
-      <p class="lead">Проверим ${n} ${plural(n, 'стратегию', 'стратегии', 'стратегий')} на настоящих сайтах. Это займёт 3–5 минут, интернет может ненадолго прерываться.</p>
+      <p class="lead">Проверим ${n} ${plural(n, 'стратегию', 'стратегии', 'стратегий')} на настоящих сайтах. Сначала коротко проверим все, потом подробно — лучшие. Это займёт около трёх минут, интернет может ненадолго прерываться.</p>
     </section>`;
 
   const task = st.task?.kind === 'select' ? st.task : null;
@@ -403,7 +550,7 @@ function setupView(st) {
   return `${intro('Подбираем')}
     <section class="stack">
       <div class="progress-head">
-        <span>${task.done === 0 ? 'Проверяем сеть без обхода' : `Стратегия ${task.done} из ${n}`}</span>
+        <span>${task.done === 0 ? 'Проверяем сеть без обхода' : selectStep(task)}</span>
         <span class="mono muted">${task.done ? esc(strategyLabel(task.current)) : ''}</span>
       </div>
       ${progress(task.done, task.total)}
@@ -418,6 +565,7 @@ function setupView(st) {
 function siteView(st) {
   const s = state.site;
   const sites = st.sites ?? [];
+  const canWorker = Boolean(st.telegram?.enabled && st.telegram?.worker);
   const result = s.result
     ? (() => {
         const [kind, label] = VERDICT_BADGE[s.result.verdict] ?? VERDICT_BADGE.unknown;
@@ -427,10 +575,16 @@ function siteView(st) {
             ? `<p class="result-text">Если на сайте не играет музыка или не грузится видео, добавьте его всё равно — вместе с доменами, с которых он их берёт.</p>
                <button class="btn sm primary" data-action="force-site" ${s.busy || st.task ? 'disabled' : ''}>Всё равно добавить</button>`
             : '';
+        // Сайт закрыт самим сервисом или по адресу — обход DPI не поможет, а воркер с не российским IP — да.
+        const viaWorker =
+          ['tunnel', 'unreachable'].includes(s.result.verdict) && canWorker
+            ? `<button class="btn sm primary" data-action="site-via-worker" ${s.busy ? 'disabled' : ''}>Открыть через другую страну</button>`
+            : '';
+        const browsers = s.result.browsers ? '<button class="btn sm primary" data-action="site-browsers">Применять в браузерах</button>' : '';
         return `<section class="panel result">
           <div class="result-head"><span class="mono strong">${esc(s.result.host)}</span>${badge(kind, label)}</div>
           <p class="result-text">${esc(s.result.message)}</p>
-          ${force}
+          ${force}${viaWorker}${browsers}
         </section>`;
       })()
     : '';
@@ -468,8 +622,22 @@ function siteView(st) {
       </label>
       ${s.error ? `<p class="field-error">${esc(s.error)}</p>` : ''}
       <button class="btn primary full" type="submit" ${s.busy || st.task ? 'disabled' : ''}>${s.busy ? `${spinner()}<span>Проверяем сайт…</span>` : '<span>Проверить и добавить</span>'}</button>
+      <button type="button" class="btn ghost full" data-action="site-via-worker" ${s.busy || !canWorker ? 'disabled' : ''}>${icon('globe', 16)}<span>Через другую страну</span></button>
+      <p class="hint">Для сайтов, закрытых для России самими сервисами: сайт пойдёт через ваш Cloudflare Worker с не российского IP — как VPN только для него.${
+        canWorker ? '' : ' Сначала задайте свой воркер в Настройки → Telegram.'
+      }</p>
     </form>
     ${result}
+    ${
+      (st.via_worker ?? []).length
+        ? `<section class="stack">
+      <div class="section-label"><span>Через другую страну</span><span>${st.via_worker.length}</span></div>
+      <div class="chips">${st.via_worker
+        .map((h) => `<button class="chip" data-action="via-worker-remove" data-host="${esc(h)}" title="Убрать">${esc(h)} ×</button>`)
+        .join('')}</div>
+    </section>`
+        : ''
+    }
     ${
       presets
         ? `<section class="stack">
@@ -681,12 +849,11 @@ function settingsView(st) {
           <span class="row-text"><span class="row-title-sm">Запускать вместе с Windows</span><span class="row-sub wrap">Значок появится в трее сразу после входа в систему</span></span>
           <button class="toggle ${state.autostart ? 'on' : ''}" role="switch" aria-checked="${Boolean(state.autostart)}" aria-label="Запускать вместе с Windows" data-action="autostart" ${state.autostart === null ? 'disabled' : ''}></button>
         </div>
-        <div class="settings-row column">
-          <span class="row-text"><span class="row-title-sm">Тема</span></span>
-          <div class="seg" role="radiogroup" aria-label="Тема">${THEMES.map(
-            ([value, label]) =>
-              `<button role="radio" aria-checked="${state.theme === value}" class="${state.theme === value ? 'on' : ''}" data-action="theme" data-theme="${value}">${label}</button>`,
-          ).join('')}</div>
+        <div class="settings-row">
+          <span class="row-text"><span class="row-title-sm">Оформление</span><span class="row-sub">Тема «${esc(themeLabel(state.look.theme))}»${
+            state.look.accent || state.look.font || state.look.radius || state.look.scale ? ', свои настройки' : ''
+          }</span></span>
+          <button class="btn sm" data-action="open" data-screen="look">Настроить</button>
         </div>
         <div class="settings-row">
           <span class="row-text"><span class="row-title-sm">Версия</span><span class="row-sub" title="${esc(appLine(st.app))}">${esc(appLine(st.app))}</span></span>
@@ -733,7 +900,7 @@ function settingsView(st) {
             .join('')}</div>
         </div>
         <div class="settings-row column">
-          <span class="row-text"><span class="row-title-sm">Стратегия</span><span class="row-sub wrap">Подбор проверяет все стратегии и оставляет лучшую. Можно выбрать и вручную. Конфиги FI: STABLE — на каждый день, LIGHT — меньше нагрузки, для игр, HARD — когда другие не проходят, SOCIAL — соцсети и RuTracker без добавления в список.</span></span>
+          <span class="row-text"><span class="row-title-sm">Стратегия</span><span class="row-sub wrap">Подбор проверяет все стратегии и оставляет лучшую. Можно выбрать и вручную. Конфиги FI: STABLE — на каждый день, LIGHT — меньше нагрузки, для игр, HARD — когда другие не проходят, SOCIAL — соцсети и RuTracker без добавления в список, DISORDER и SEQOVL — для других провайдеров (SEQOVL — без поддельных пакетов).</span></span>
           <div class="input-row">
             <select class="select" id="strategy-select" ${st.task ? 'disabled' : ''}>
               ${(st.strategy_list ?? [])
@@ -788,7 +955,11 @@ function settingsView(st) {
       <div class="panel">
         <div class="settings-row">
           <span class="row-text"><span class="row-title-sm">Прокси для Telegram и AyuGram</span><span class="row-sub">${
-            tg.enabled ? `<span class="mono">${esc(tg.address)}</span>${tg.error ? ' · не запущен' : tg.route ? ` · ${esc(routeText(tg.route))}` : ''}` : 'Выключен'
+            tg.enabled
+              ? `<span class="mono">${esc(tg.address)}</span>${tg.error ? ' · не запущен' : tg.route ? ` · ${esc(routeText(tg.route))}` : ''}${
+                  tg.edge && !tg.error ? ` · вход Cloudflare ${esc(tg.edge)}` : ''
+                }`
+              : 'Выключен'
           }</span></span>
           <button class="toggle ${tg.enabled ? 'on' : ''}" role="switch" aria-checked="${Boolean(tg.enabled)}" aria-label="Прокси для Telegram" data-action="tg-toggle"></button>
         </div>
@@ -917,8 +1088,9 @@ function unavailableView() {
 
 const root = document.getElementById('app');
 let lastHTML = '';
+let shownScreen = ''; // какой экран уже показан: при смене он появляется с анимацией
 
-const FOCUS_KEYS = ['action', 'screen', 'mode', 'host', 'service', 'fix', 'game', 'path', 'theme', 'name'];
+const FOCUS_KEYS = ['action', 'screen', 'mode', 'host', 'service', 'fix', 'game', 'path', 'value', 'name'];
 
 function render() {
   const html = view();
@@ -930,6 +1102,14 @@ function render() {
     ? { id: active.id, data: FOCUS_KEYS.map((k) => active.dataset?.[k]), start: active.selectionStart, end: active.selectionEnd }
     : null;
   root.innerHTML = html;
+  // Новый экран выезжает снизу (анимации в app.css; при выключенных анимациях класс ничего не делает).
+  const screen = state.unavailable || !state.status ? '' : `${state.screen}:${Boolean(state.status.strategy)}`;
+  if (screen !== shownScreen) {
+    shownScreen = screen;
+    root.classList.remove('screen-enter');
+    void root.offsetWidth; // перезапуск анимации
+    root.classList.add('screen-enter');
+  }
   if (!focus) return;
   const target = focus.id
     ? document.getElementById(focus.id)
@@ -1001,6 +1181,38 @@ async function addSite(force = false) {
   try {
     s.result = await api('add_site', { host, force });
     if (!force) s.input = '';
+  } catch (err) {
+    handleError(err, (m) => (s.error = m));
+  } finally {
+    s.busy = false;
+  }
+  await refresh();
+}
+
+// addViaWorker пускает сайт через свой воркер — с не российского IP, как VPN только для него.
+async function addViaWorker() {
+  const s = state.site;
+  const host = (s.result?.host || s.input || '').trim();
+  if (!host) {
+    s.error = 'Введите адрес сайта';
+    render();
+    return;
+  }
+  s.busy = true;
+  s.error = '';
+  render();
+  try {
+    await api('add_via_worker', { host });
+    const browsers = state.status?.via_worker_browsers;
+    s.result = {
+      host,
+      verdict: 'via_worker',
+      message: browsers
+        ? 'Сайт пойдёт через ваш Cloudflare Worker — с не российского IP. Обновите страницу в браузере.'
+        : 'Сайт пойдёт через ваш Cloudflare Worker — с не российского IP. В Telegram — сразу, а в браузерах — когда включите «Применять в браузерах».',
+      browsers: !browsers,
+    };
+    s.input = '';
   } catch (err) {
     handleError(err, (m) => (s.error = m));
   } finally {
@@ -1164,8 +1376,23 @@ document.addEventListener('click', (event) => {
     case 'autostart':
       setAutostart(!state.autostart);
       break;
-    case 'theme':
-      setTheme(el.dataset.theme);
+    case 'look-theme':
+      setLook({ theme: el.dataset.value });
+      break;
+    case 'look-accent':
+      setLook({ accent: el.dataset.value });
+      break;
+    case 'look-radius':
+      setLook({ radius: el.dataset.value });
+      break;
+    case 'look-scale':
+      setLook({ scale: Number(el.dataset.value) });
+      break;
+    case 'look-motion':
+      setLook({ motion: !state.look.motion });
+      break;
+    case 'look-reset':
+      setLook({ ...DEFAULT_LOOK, theme: state.look.theme });
       break;
     case 'tg-toggle':
       command('set_telegram', { on: !state.status?.telegram?.enabled });
@@ -1234,7 +1461,7 @@ document.addEventListener('click', (event) => {
       command('set_auto_update', { on: !state.status?.base?.auto_update });
       break;
     case 'back':
-      go('main');
+      go(state.screen === 'look' ? 'settings' : 'main');
       break;
     case 'open':
       go(el.dataset.screen);
@@ -1272,6 +1499,13 @@ document.addEventListener('click', (event) => {
       break;
     case 'force-site':
       addSite(true);
+      break;
+    case 'site-via-worker':
+      addViaWorker();
+      break;
+    case 'site-browsers':
+      command('set_via_worker_browsers', { on: true });
+      if (state.site.result) state.site.result.browsers = false;
       break;
     case 'sites-export':
       fileAction('/app/sites/export', (d) => (d.path ? `Список сохранён: ${d.path}` : ''));
@@ -1386,6 +1620,14 @@ function schedule() {
 }
 
 document.addEventListener('change', (event) => {
+  if (event.target.id === 'font-select') {
+    setLook({ font: event.target.value });
+    return;
+  }
+  if (event.target.id === 'accent-input') {
+    setLook({ accent: event.target.value.toUpperCase() });
+    return;
+  }
   if (event.target.id === 'cf-region') {
     state.cfRegion = event.target.value;
     return;
@@ -1408,7 +1650,9 @@ function applyScale() {
   if (size === scaledTo || width === 0) return;
   scaledTo = size;
 
-  const scale = Math.min(2, Math.max(0.8, width / DESIGN_WIDTH));
+  // «Размер интерфейса» в оформлении — поверх подгонки под ширину окна.
+  const zoom = (state.look?.scale || 100) / 100;
+  const scale = Math.min(2.4, Math.max(0.72, (width / DESIGN_WIDTH) * zoom));
   const box = document.getElementById('scale');
   box.style.transform = `scale(${scale})`;
   box.style.width = `${width / scale}px`;
@@ -1434,5 +1678,7 @@ window.fi = {
   },
 };
 
-loadTheme();
+applyLook(readLook());
+applyScale();
+loadLook();
 refresh().then(schedule);

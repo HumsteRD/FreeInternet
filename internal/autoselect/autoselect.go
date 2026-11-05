@@ -33,6 +33,9 @@ type Options struct {
 	// StopWhenPerfect — закончить, как только стратегия прошла все проверки: лучше уже не будет,
 	// а каждый следующий прогон — ещё десяток секунд без обхода.
 	StopWhenPerfect bool
+	// Finalists — подбор в два этапа: все стратегии проходят короткий отбор, и полностью
+	// проверяются только столько лидеров. 0 — каждая стратегия сразу полной проверкой.
+	Finalists int
 }
 
 // Run делает прогон без обхода и прогоны стратегий; при отмене ctx возвращает то, что успел.
@@ -60,7 +63,11 @@ func Run(ctx context.Context, o Options, strategies []strategy.Strategy) ([]sele
 		return nil, err
 	}
 
+	screening := o.Finalists > 0 && len(strategies) > o.Finalists+1
 	total := len(strategies) + 1
+	if screening {
+		total += o.Finalists
+	}
 	name := o.BaselineName
 	if name == "" {
 		name = selector.Baseline
@@ -72,14 +79,19 @@ func Run(ctx context.Context, o Options, strategies []strategy.Strategy) ([]sele
 	gameTCP, gameUDP := strategy.GamePortsFor(o.GameMode, o.Games)
 	vars := strategy.Vars{Bin: filepath.Join(o.BaseDir, "bin"), Lists: listsDir, GameTCP: gameTCP, GameUDP: gameUDP}
 	exe := filepath.Join(o.BaseDir, "bin", "winws.exe")
+	step := 1
+	if screening {
+		strategies = screen(ctx, o, exe, vars, strategies, runs[0], total)
+		step += total - 1 - o.Finalists
+	}
 	for i, s := range strategies {
 		if ctx.Err() != nil {
 			break
 		}
-		o.start(i+1, total, s.Name)
+		o.start(step+i, total, s.Name)
 		run := measure(ctx, o, exe, s.Name, s.Expand(vars))
 		runs = append(runs, run)
-		o.done(i+1, total, run)
+		o.done(step+i, total, run)
 		if o.StopWhenPerfect && perfect(run) {
 			break
 		}

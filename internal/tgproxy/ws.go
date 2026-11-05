@@ -61,10 +61,13 @@ func (e *statusError) Error() string {
 	return fmt.Sprintf("HTTP %d", e.code)
 }
 
+// wsLocalAddr — с какого адреса выходить; задаётся только в живых проверках мимо VPN.
+var wsLocalAddr net.Addr
+
 // dialWS открывает wss://host/path, подключаясь к addr. Сертификат проверяется по host,
 // поэтому подключение к адресу напрямую не ослабляет защиту.
 func dialWS(ctx context.Context, addr, host, path string) (*wsConn, error) {
-	var d net.Dialer
+	d := net.Dialer{LocalAddr: wsLocalAddr}
 	raw, err := d.DialContext(ctx, "tcp", addr)
 	if err != nil {
 		return nil, err
