@@ -12,7 +12,7 @@ import (
 // Обычные тесты не ходят в сеть: замер входов в Cloudflare подменён «ничего не ответило».
 func TestMain(m *testing.M) {
 	if os.Getenv("FI_LIVE_EDGES") == "" {
-		edgePing = func(context.Context, string) (time.Duration, bool) { return 0, false }
+		edgePing = func(context.Context, string, string) (time.Duration, bool) { return 0, false }
 	}
 	os.Exit(m.Run())
 }
@@ -21,13 +21,16 @@ func TestPickEdges(t *testing.T) {
 	oldPing, oldCheck := edgePing, edgeCheck
 	defer func() { edgePing, edgeCheck = oldPing, oldCheck }()
 	rtt := map[string]time.Duration{"1.1.1.1": 70 * time.Millisecond, "2.2.2.2": 30 * time.Millisecond, "3.3.3.3": 40 * time.Millisecond, "4.4.4.4": 50 * time.Millisecond}
-	edgePing = func(_ context.Context, ip string) (time.Duration, bool) {
+	edgePing = func(_ context.Context, ip, host string) (time.Duration, bool) {
+		if ip == "3.3.3.3" {
+			return 0, false // быстрый, но воркер через него не отдаётся: рукопожатие не сошлось
+		}
 		d, ok := rtt[ip]
 		return d, ok
 	}
 	edgeCheck = func(_ context.Context, ip, host string) (string, error) {
-		if ip == "3.3.3.3" {
-			return "", errors.New("чужой сертификат") // быстрый, но воркер через него не отдаётся
+		if ip == "1.1.1.1" {
+			return "", errors.New("trace не ответил") // код дата-центра — только для окна
 		}
 		return map[string]string{"2.2.2.2": "DME"}[ip], nil
 	}
@@ -36,7 +39,7 @@ func TestPickEdges(t *testing.T) {
 	for _, e := range got {
 		ips = append(ips, e.IP)
 	}
-	if !slices.Equal(ips, []string{"2.2.2.2", "4.4.4.4", "1.1.1.1"}) || got[0].Colo != "DME" {
+	if !slices.Equal(ips, []string{"2.2.2.2", "4.4.4.4", "1.1.1.1"}) || got[0].Colo != "DME" || got[2].Colo != "" {
 		t.Fatalf("входы: %+v", got)
 	}
 }
@@ -44,7 +47,7 @@ func TestPickEdges(t *testing.T) {
 func TestEdgesMeasureInBackground(t *testing.T) {
 	oldPing, oldCheck := edgePing, edgeCheck
 	defer func() { edgePing, edgeCheck = oldPing, oldCheck }()
-	edgePing = func(context.Context, string) (time.Duration, bool) { return 10 * time.Millisecond, true }
+	edgePing = func(context.Context, string, string) (time.Duration, bool) { return 10 * time.Millisecond, true }
 	edgeCheck = func(context.Context, string, string) (string, error) { return "ARN", nil }
 
 	s := &Server{}
