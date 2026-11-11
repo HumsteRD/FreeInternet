@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -254,5 +255,181 @@ func TestWebProxyWithoutWorker(t *testing.T) {
 	defer srv.Close()
 	if code, _ := tunnel(t, srv, "t.me:443"); code != http.StatusBadGateway {
 		t.Fatalf("без воркера и без прямого пути: %d, ждали 502", code)
+	}
+}
+
+func TestBlockKey(t *testing.T) {
+	cases := map[string]string{
+		"rr4---sn-ixh7yn7e.googlevideo.com":         "sn-ixh7yn7e.googlevideo.com",
+		"RR12---sn-hpg5avbpj-n8ms.GoogleVideo.com.": "sn-hpg5avbpj-n8ms.googlevideo.com",
+		"redirector.googlevideo.com":                "redirector.googlevideo.com",
+		"telegram.org":                              "telegram.org",
+	}
+	for host, want := range cases {
+		if got := blockKey(host); got != want {
+			t.Errorf("blockKey(%q) = %q, ждали %q", host, got, want)
+		}
+	}
+}
+
+// slowUpstream — сервер, который отвечает с задержкой.
+func slowUpstream(prefix string, delay time.Duration) net.Conn {
+	ours, theirs := net.Pipe()
+	go func() {
+		defer theirs.Close()
+		buf := make([]byte, 64)
+		n, _ := theirs.Read(buf)
+		time.Sleep(delay)
+		theirs.Write(append([]byte(prefix), buf[:n]...))
+	}()
+	return ours
+}
+
+// TestWebProxyHedge: сервер молчит напрямую — браузер не ждёт все секунды silentTimeout: через
+// hedgeDelay то же приветствие уходит через воркер. Остальные видеосерверы того же узла YouTube
+// после этого идут сразу через воркер, а узел, который отвечает сам, воркер не трогает.
+func TestWebProxyHedge(t *testing.T) {
+	oldSilent, oldHedge := silentTimeout, hedgeDelay
+	silentTimeout, hedgeDelay = 1500*time.Millisecond, 50*time.Millisecond
+	defer func() { silentTimeout, hedgeDelay = oldSilent, oldHedge }()
+
+	var mu sync.Mutex
+	direct, worker := map[string]int{}, map[string]int{}
+	count := func(m map[string]int, host string) {
+		mu.Lock()
+		defer mu.Unlock()
+		m[host]++
+	}
+	calls := func(m map[string]int, host string) int {
+		mu.Lock()
+		defer mu.Unlock()
+		return m[host]
+	}
+	p := &WebProxy{
+		Server:   &Server{Worker: "fi.example.workers.dev"},
+		Fallback: func() []string { return []string{"googlevideo.com"} },
+		dialDirect: func(_ context.Context, addr string) (net.Conn, error) {
+			host, _, _ := net.SplitHostPort(addr)
+			count(direct, host)
+			switch {
+			case strings.Contains(host, "sn-closed"):
+				return silentUpstream(), nil
+			case strings.Contains(host, "sn-slow"):
+				return slowUpstream("direct:", 300*time.Millisecond), nil
+			}
+			return echoUpstream("direct:"), nil
+		},
+		dialWorker: func(_ context.Context, host string, _ int) (net.Conn, error) {
+			count(worker, host)
+			return echoUpstream("worker:"), nil
+		},
+	}
+	srv := httptest.NewServer(p)
+	defer srv.Close()
+	hello := "\x16\x03\x01\x00\x04ping"
+
+	start := time.Now()
+	if code, got := tunnelTLS(t, srv, "rr1---sn-closed.googlevideo.com:443", hello); code != 200 || got != "worker:"+hello {
+		t.Fatalf("сервер молчит: %d %q", code, got)
+	}
+	if took := time.Since(start); took > 700*time.Millisecond {
+		t.Fatalf("браузер ждал %v — приветствие должно было уйти через воркер через %v", took, hedgeDelay)
+	}
+
+	// Сервер напрямую так и не ответил — узел запоминается закрытым, как только это выяснится.
+	deadline := time.Now().Add(5 * time.Second)
+	for !p.directBlocked("sn-closed.googlevideo.com") {
+		if time.Now().After(deadline) {
+			t.Fatal("молчащий узел не запомнен закрытым")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if code, got := tunnelTLS(t, srv, "rr3---sn-closed.googlevideo.com:443", hello); code != 200 || got != "worker:"+hello {
+		t.Fatalf("другой сервер закрытого узла: %d %q", code, got)
+	}
+	if n := calls(direct, "rr3---sn-closed.googlevideo.com"); n != 0 {
+		t.Fatalf("сервер закрытого узла пробовали напрямую %d раз", n)
+	}
+
+	// Сервер отвечает сам, но медленнее воркера: берётся воркер, а узел закрытым не считается.
+	if code, got := tunnelTLS(t, srv, "rr1---sn-slow.googlevideo.com:443", hello); code != 200 || got != "worker:"+hello {
+		t.Fatalf("медленный сервер: %d %q", code, got)
+	}
+	time.Sleep(450 * time.Millisecond) // прямой путь успевает ответить
+	if p.directBlocked("sn-slow.googlevideo.com") {
+		t.Fatal("медленный, но отвечающий узел запомнен закрытым")
+	}
+
+	// Сервер отвечает сразу — воркер не нужен вовсе.
+	if code, got := tunnelTLS(t, srv, "rr1---sn-cache.googlevideo.com:443", hello); code != 200 || got != "direct:"+hello {
+		t.Fatalf("сервер отвечает напрямую: %d %q", code, got)
+	}
+	if n := calls(worker, "rr1---sn-cache.googlevideo.com"); n != 0 {
+		t.Fatalf("воркер вызван %d раз, хотя сервер ответил сам", n)
+	}
+}
+
+// TestWebProxyHedgeWithoutWorker: без воркера прямой путь ждёт ответа до конца.
+func TestWebProxyHedgeWithoutWorker(t *testing.T) {
+	oldHedge := hedgeDelay
+	hedgeDelay = 20 * time.Millisecond
+	defer func() { hedgeDelay = oldHedge }()
+	p := &WebProxy{
+		Server:   &Server{},
+		Fallback: func() []string { return []string{"googlevideo.com"} },
+		dialDirect: func(context.Context, string) (net.Conn, error) {
+			return slowUpstream("direct:", 150*time.Millisecond), nil
+		},
+	}
+	srv := httptest.NewServer(p)
+	defer srv.Close()
+	hello := "\x16\x03\x01\x00\x04ping"
+	if code, got := tunnelTLS(t, srv, "rr1---sn-slow.googlevideo.com:443", hello); code != 200 || got != "direct:"+hello {
+		t.Fatalf("без воркера: %d %q", code, got)
+	}
+}
+
+// TestWebProxyTelegramSiteHedge: адрес сайта Telegram закрыт — подключение висит до таймаута.
+// Мини-приложение его не ждёт: через hedgeDelay соединение открывается через воркер.
+func TestWebProxyTelegramSiteHedge(t *testing.T) {
+	oldHedge := hedgeDelay
+	hedgeDelay = 50 * time.Millisecond
+	defer func() { hedgeDelay = oldHedge }()
+	p := &WebProxy{
+		Server: &Server{Worker: "fi.example.workers.dev"},
+		dialDirect: func(ctx context.Context, _ string) (net.Conn, error) {
+			<-ctx.Done() // пакеты к закрытому адресу пропадают
+			return nil, ctx.Err()
+		},
+		dialWorker: func(context.Context, string, int) (net.Conn, error) { return echoUpstream("worker:"), nil },
+	}
+	srv := httptest.NewServer(p)
+	defer srv.Close()
+	start := time.Now()
+	if code, got := tunnel(t, srv, "telegram.org:443"); code != 200 || got != "worker:ping" {
+		t.Fatalf("закрытый адрес: %d %q", code, got)
+	}
+	if took := time.Since(start); took > time.Second {
+		t.Fatalf("мини-приложение ждало %v, хотя воркер отвечает сразу", took)
+	}
+}
+
+// TestWebProxyDirectAfterWorkerFails: сервер помнится закрытым и идёт сразу через воркер, но
+// воркер подвёл — тогда пробуем напрямую: вдруг сервер уже отвечает сам.
+func TestWebProxyDirectAfterWorkerFails(t *testing.T) {
+	p := &WebProxy{
+		Server:     &Server{Worker: "fi.example.workers.dev"},
+		Fallback:   func() []string { return []string{"googlevideo.com"} },
+		dialDirect: func(context.Context, string) (net.Conn, error) { return echoUpstream("direct:"), nil },
+		dialWorker: func(context.Context, string, int) (net.Conn, error) {
+			return nil, errors.New("воркер недоступен")
+		},
+	}
+	p.markBlocked("sn-node.googlevideo.com")
+	srv := httptest.NewServer(p)
+	defer srv.Close()
+	hello := "\x16\x03\x01\x00\x04ping"
+	if code, got := tunnelTLS(t, srv, "rr2---sn-node.googlevideo.com:443", hello); code != 200 || got != "direct:"+hello {
+		t.Fatalf("воркер подвёл, сервер отвечает сам: %d %q", code, got)
 	}
 }

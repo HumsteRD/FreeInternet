@@ -181,9 +181,11 @@ func (s *Server) dialCF(ctx context.Context, k poolKey) (upstream, error) {
 	return nil, errors.Join(errs...)
 }
 
-// dialHost открывает WebSocket к домену по первым его адресам из DNS.
+// dialHost открывает WebSocket к домену по первым его адресам из DNS. Быстрые входы в Cloudflare
+// сюда не годятся: они проверены только для своего воркера, а чужой домен тот же адрес может
+// не обслуживать (ошибка 1034).
 func (s *Server) dialHost(ctx context.Context, host, path string) (*wsConn, error) {
-	ips := s.cfAddrs(ctx, host, s.edges(s.edgeRef()))
+	ips := s.resolve(ctx, host, 0)
 	if len(ips) == 0 {
 		return nil, fmt.Errorf("%s: адрес не найден", host)
 	}
@@ -191,7 +193,7 @@ func (s *Server) dialHost(ctx context.Context, host, path string) (*wsConn, erro
 	for _, ip := range ips[:min(len(ips), 2)] {
 		dialCtx, cancel := context.WithTimeout(ctx, dialTimeout)
 		var ws *wsConn
-		ws, err = dialWS(dialCtx, net.JoinHostPort(ip, "443"), host, path)
+		ws, err = dialWS(dialCtx, net.JoinHostPort(ip, workerPort), host, path)
 		cancel()
 		if err == nil {
 			return ws, nil

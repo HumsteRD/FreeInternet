@@ -51,6 +51,10 @@ func Latest(ctx context.Context, client *http.Client) (Release, error) {
 		return Release{}, err
 	}
 	defer resp.Body.Close()
+	// Без входа GitHub отвечает на 60 запросов в час с одного адреса; за VPN адрес общий.
+	if resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusTooManyRequests {
+		return Release{}, fmt.Errorf("GitHub ограничил число запросов с этого адреса (так бывает через VPN) — FI спросит позже")
+	}
 	if resp.StatusCode != http.StatusOK {
 		return Release{}, fmt.Errorf("GitHub ответил %d", resp.StatusCode)
 	}

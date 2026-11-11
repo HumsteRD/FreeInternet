@@ -482,6 +482,21 @@ function mainView(st) {
   const dns = st.dns_problem
     ? `<section class="panel notice warn">${icon('globe', 16)}<span>DNS роутера или провайдера не отвечает — браузер может не открывать сайты (YouTube и другие), хотя проверки FI проходят: FI ищет адреса в обход него. <button class="btn sm" data-action="public-dns">Использовать публичный DNS</button></span></section>`
     : '';
+  // Серверы Google со свежими роликами провайдер закрывает по адресу: стратегия их не откроет.
+  const tgw = st.telegram ?? {};
+  const fresh =
+    st.youtube_blocked && !st.youtube_via_worker && !st.vpn
+      ? `<section class="panel notice warn">${icon('play', 16)}<span>Провайдер закрыл серверы Google, с которых YouTube отдаёт свежие и редкие ролики, — обход их не откроет, поэтому часть видео не грузится. ${
+          tgw.enabled && tgw.worker
+            ? 'FI может вести такие серверы через ваш Cloudflare Worker. <button class="btn sm" data-action="youtube-via-worker-on">Включить</button>'
+            : 'Помогает свой Cloudflare Worker: задайте его в разделе Telegram. <button class="btn sm" data-action="open" data-screen="settings">Настройки</button>'
+        }</span></section>`
+      : '';
+  // Старый код воркера пересылает данные мелкими кусками, и Cloudflare обрывает быстрые загрузки.
+  const slowWorker =
+    tgw.enabled && tgw.worker && tgw.worker_slow
+      ? `<section class="panel notice warn">${icon('refresh', 16)}<span>Код вашего Cloudflare Worker устарел: Cloudflare обрывает через него быстрые загрузки, поэтому видео и файлы идут рывками. Обновление занимает минуту: «Скопировать код воркера» в настройках → вставить в Cloudflare → Deploy. <button class="btn sm" data-action="open" data-screen="settings">Настройки</button></span></section>`
+      : '';
   const game = st.anti_cheat
     ? `<section class="panel notice">${icon('play', 16)}<span>Идёт игра с античитом ${esc(st.anti_cheat)}. ${
         st.running
@@ -491,6 +506,8 @@ function mainView(st) {
     : '';
   return `${heroView(st)}
     ${dns}
+    ${fresh}
+    ${slowWorker}
     ${game}
     ${errorLine()}
     ${vpn}
@@ -1040,6 +1057,9 @@ function viaWorkerSection(st) {
   } else if ((sites.length || st.youtube_via_worker) && (tg.worker_key_ok === false || tg.worker_outdated)) {
     warn = true;
     hint = 'В воркере старый код: нажмите «Скопировать код воркера», вставьте его в Cloudflare (Edit code → Deploy) и нажмите «Проверить воркер».';
+  } else if (tg.worker_slow) {
+    warn = true;
+    hint = 'Код воркера устарел: Cloudflare обрывает через него быстрые загрузки, и видео с файлами идут рывками. Нажмите «Скопировать код воркера», вставьте его в Cloudflare (воркер → Edit code → стереть всё, вставить → Deploy) и нажмите «Проверить воркер». Или разверните воркер заново кнопкой «Развернуть» выше.';
   }
   return `<section class="stack">
       <div class="section-label"><span>Сайты через воркер</span></div>
@@ -1089,6 +1109,10 @@ function unavailableView() {
 const root = document.getElementById('app');
 let lastHTML = '';
 let shownScreen = ''; // какой экран уже показан: при смене он появляется с анимацией
+let enteredAt = 0; // когда он показан: от этого времени считаются анимации (--since в app.css)
+
+// appearKey — по чему узнать итог проверки или строку сообщения: появившиеся только что выезжают.
+const appearKey = (el) => `${el.className.replace(' appear', '')}|${el.textContent}`;
 
 const FOCUS_KEYS = ['action', 'screen', 'mode', 'host', 'service', 'fix', 'game', 'path', 'value', 'name'];
 
@@ -1101,14 +1125,23 @@ function render() {
   const focus = active && root.contains(active)
     ? { id: active.id, data: FOCUS_KEYS.map((k) => active.dataset?.[k]), start: active.selectionStart, end: active.selectionEnd }
     : null;
-  root.innerHTML = html;
   // Новый экран выезжает снизу (анимации в app.css; при выключенных анимациях класс ничего не делает).
+  // Перерисовка того же экрана заменяет все элементы, поэтому анимации считаются от времени его
+  // показа: иначе каждое обновление (новые цифры, ход подбора) проигрывало бы появление заново.
   const screen = state.unavailable || !state.status ? '' : `${state.screen}:${Boolean(state.status.strategy)}`;
-  if (screen !== shownScreen) {
+  const entering = screen !== shownScreen;
+  if (entering) {
     shownScreen = screen;
-    root.classList.remove('screen-enter');
-    void root.offsetWidth; // перезапуск анимации
-    root.classList.add('screen-enter');
+    enteredAt = performance.now();
+  }
+  const had = entering ? null : new Set([...root.querySelectorAll('.notice-line, .result')].map(appearKey));
+  root.style.setProperty('--since', `${Math.round(performance.now() - enteredAt)}ms`);
+  root.classList.add('screen-enter');
+  root.innerHTML = html;
+  if (had) {
+    for (const el of root.querySelectorAll('.notice-line, .result')) {
+      if (!had.has(appearKey(el))) el.classList.add('appear');
+    }
   }
   if (!focus) return;
   const target = focus.id
@@ -1423,6 +1456,9 @@ document.addEventListener('click', (event) => {
       break;
     case 'via-worker-browsers':
       command('set_via_worker_browsers', { on: !state.status?.via_worker_browsers });
+      break;
+    case 'youtube-via-worker-on':
+      command('set_youtube_via_worker', { on: true });
       break;
     case 'youtube-via-worker':
       command('set_youtube_via_worker', { on: !state.status?.youtube_via_worker });

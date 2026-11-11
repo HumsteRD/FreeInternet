@@ -218,7 +218,7 @@ func regressed(prev, cur []Service) bool {
 var statusText = map[probe.Status]string{
 	probe.OK:          "работает",
 	probe.DNSFail:     "адрес не найден",
-	probe.DNSSpoof:    "провайдер подменяет адрес",
+	probe.DNSSpoof:    "провайдер подменяет адрес сайта в DNS — включите в браузере безопасный DNS (DNS поверх HTTPS)",
 	probe.TCPFail:     "сервер недоступен",
 	probe.TLSReset:    "соединение обрывается",
 	probe.TLSTimeout:  "соединение зависает",

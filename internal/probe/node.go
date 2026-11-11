@@ -20,8 +20,18 @@ const videoRedirector = "redirector.googlevideo.com"
 // YouTube обслуживает адрес, с которого пришёл запрос.
 var reportMappingURL = "https://" + videoRedirector + "/report_mapping?di=no"
 
-// lookupHost — подмена DNS в тестах.
-var lookupHost = net.DefaultResolver.LookupHost
+// lookupHost проверяет, что адрес есть в DNS: в системном, а если тот его не знает — через DoH
+// (провайдер может подменять ответы обычного DNS). В тестах подменяется.
+var lookupHost = func(ctx context.Context, host string) ([]string, error) {
+	addrs, err := net.DefaultResolver.LookupHost(ctx, host)
+	if err == nil {
+		return addrs, nil
+	}
+	if ip, dohErr := lookupDoH(ctx, host); dohErr == nil {
+		return []string{ip}, nil
+	}
+	return nil, err
+}
 
 var mappingCluster = regexp.MustCompile(`=>\s*([a-z0-9-]+)`)
 

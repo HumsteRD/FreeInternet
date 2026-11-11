@@ -14,7 +14,11 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"regexp"
+	"strconv"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -43,22 +47,53 @@ type wsConn struct {
 	viaCF     bool   // через общий домен Cloudflare
 	host      string // домен, к которому открыт WebSocket
 	cfBase    string // общий домен Cloudflare, если соединение через него
-	// closeReason — причина из кадра закрытия, если сервер её прислал.
+	// closeReason — причина из кадра закрытия, если сервер её прислал; closeCode — его код
+	// (1000 — обычное закрытие, 1011 — у воркера что-то сломалось).
 	closeReason string
+	closeCode   uint16
 	wmu         sync.Mutex
+	// lastRecv — когда пришёл последний кадр, любой (и pong): по нему сторож соединений
+	// с воркером видит, что соединение живо.
+	lastRecv atomic.Int64
 }
 
 // statusError — сервер ответил не переходом на WebSocket.
 type statusError struct {
 	code     int
 	location string
+	body     string // начало ответа: по нему видно, кто отказал — воркер или сам Cloudflare
 }
 
 func (e *statusError) Error() string {
-	if e.location != "" {
+	switch {
+	case e.location != "":
 		return fmt.Sprintf("HTTP %d → %s", e.code, e.location)
+	case e.cfCode() != 0:
+		return fmt.Sprintf("HTTP %d (Cloudflare, ошибка %d)", e.code, e.cfCode())
+	case e.fromEdge():
+		return fmt.Sprintf("HTTP %d (отказал Cloudflare, а не воркер)", e.code)
 	}
 	return fmt.Sprintf("HTTP %d", e.code)
+}
+
+var cfErrorCode = regexp.MustCompile(`(?i)error code: (\d{3,4})`)
+
+// cfCode — номер ошибки Cloudflare из ответа «error code: 1034»; 0 — его нет.
+func (e *statusError) cfCode() int {
+	if m := cfErrorCode.FindStringSubmatch(e.body); m != nil {
+		n, _ := strconv.Atoi(m[1])
+		return n
+	}
+	return 0
+}
+
+// fromEdge — отказал сам Cloudflare, до воркера запрос не дошёл. Воркер FI отвечает простым
+// текстом, а Cloudflare — строкой «error code: 1034» или страницей HTML («403 Forbidden»): так
+// отвечают его адреса, которым запрещено обслуживать чужие сайты (2026-11-11: 172.65.50.139,
+// 104.16.123.96, 141.101.90.17, 172.64.32.17).
+func (e *statusError) fromEdge() bool {
+	b := strings.ToLower(e.body)
+	return e.cfCode() != 0 || strings.Contains(b, "<html") || strings.Contains(b, "<!doctype")
 }
 
 // wsLocalAddr — с какого адреса выходить; задаётся только в живых проверках мимо VPN.
@@ -103,9 +138,10 @@ func dialWS(ctx context.Context, addr, host, path string) (*wsConn, error) {
 		return nil, err
 	}
 	if resp.StatusCode != http.StatusSwitchingProtocols {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 		resp.Body.Close()
 		conn.Close()
-		return nil, &statusError{code: resp.StatusCode, location: resp.Header.Get("Location")}
+		return nil, &statusError{code: resp.StatusCode, location: resp.Header.Get("Location"), body: string(body)}
 	}
 	if resp.Header.Get("Sec-WebSocket-Accept") != acceptKey(key) {
 		conn.Close()
@@ -166,7 +202,8 @@ func (w *wsConn) recv() ([]byte, error) {
 		}
 		switch op {
 		case opClose:
-			if len(payload) > 2 { // код и причина: воркер так сообщает, почему оборвал соединение
+			if len(payload) >= 2 { // код и причина: воркер так сообщает, почему оборвал соединение
+				w.closeCode = binary.BigEndian.Uint16(payload)
 				w.closeReason = string(payload[2:])
 			}
 			w.writeFrame(opClose, payload[:min(2, len(payload))])
@@ -196,6 +233,7 @@ func (w *wsConn) readFrame() (fin bool, op byte, payload []byte, err error) {
 	if _, err = io.ReadFull(w.br, h[:]); err != nil {
 		return
 	}
+	w.lastRecv.Store(time.Now().UnixNano())
 	fin, op = h[0]&0x80 != 0, h[0]&0x0F
 	length := uint64(h[1] & 0x7F)
 	switch length {

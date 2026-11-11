@@ -310,7 +310,7 @@ func siteActionFor(s probe.Status) siteAction {
 	case probe.TLSReset, probe.TLSTimeout, probe.Freeze16K, probe.ConnReset, probe.QUICFail, probe.Failed:
 		return siteAction{"dpi", "Провайдер мешает соединению — сайт добавлен в список обхода.", true}
 	case probe.DNSSpoof:
-		return siteAction{"dns", "Провайдер подменяет адрес сайта. Поможет «Публичный DNS» в настройках.", false}
+		return siteAction{"dns", "Провайдер подменяет адрес сайта в DNS. Включите в браузере безопасный DNS (DNS поверх HTTPS); если не поможет — «Публичный DNS» в настройках FI.", false}
 	case probe.HTTPBlocked:
 		return siteAction{"tunnel", "Сайт сам ограничивает доступ из России. Добавьте его в «Сайты через воркер» в настройках.", false}
 	case probe.TCPFail:

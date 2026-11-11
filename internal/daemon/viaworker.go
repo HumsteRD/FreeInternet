@@ -169,6 +169,14 @@ func throughWorker(ctx context.Context, srv *tgproxy.Server, results []probe.Res
 	}
 }
 
+// youtubeBlocked — провайдер закрыл по адресу видеосервер YouTube, и через воркер он не открыт:
+// стратегия тут не поможет, окно предлагает включить свежие ролики через воркер.
+func youtubeBlocked(results []probe.Result) bool {
+	return slices.ContainsFunc(results, func(r probe.Result) bool {
+		return r.Status == probe.IPBlocked && r.Target.Group == "youtube"
+	})
+}
+
 // WorkerCode — код воркера с ключом этого FI.
 func (d *Daemon) WorkerCode() string {
 	d.mu.Lock()

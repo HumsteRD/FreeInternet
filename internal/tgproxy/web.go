@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -274,32 +275,178 @@ func readTLSRecord(r *bufio.Reader) ([]byte, error) {
 	return rec, nil
 }
 
-// dialAnswering отправляет приветствие напрямую и ждёт первых байт ответа; если сервер молчит
-// или адрес закрыт, отправляет приветствие через воркер. answer — уже полученные байты ответа.
-func (p *WebProxy) dialAnswering(ctx context.Context, host string, port int, hello []byte) (conn net.Conn, answer []byte, err error) {
-	var errs []error
-	if !p.directBlocked(host) {
-		dctx, cancel := context.WithTimeout(ctx, webDirectTimeout)
-		conn, err = p.direct(dctx, net.JoinHostPort(host, strconv.Itoa(port)))
-		cancel()
-		if err == nil {
-			if answer, err = firstAnswer(conn, hello, silentTimeout); err == nil {
-				return conn, answer, nil
-			}
-			conn.Close()
+// hedgeDelay — сколько ждать ответа сервера напрямую, прежде чем отправить то же приветствие
+// ещё и через воркер. Сервер Google отвечает на приветствие за один обмен пакетами — десятки
+// миллисекунд; молчит дольше — скорее всего, провайдер его закрыл. Раньше браузер ждал все три
+// секунды silentTimeout на каждом новом видеосервере, и ролик заметно думал перед стартом.
+var hedgeDelay = 300 * time.Millisecond
+
+// workerAnswerWait — сколько ждать первого ответа сервера через воркер.
+const workerAnswerWait = 10 * time.Second
+
+// videoNode — видеосервер YouTube: rr4---sn-ixh7yn7e.googlevideo.com.
+var videoNode = regexp.MustCompile(`^rr\d+---(sn-[a-z0-9-]+\.googlevideo\.com)$`)
+
+// blockKey — под каким именем помнить, что сервер закрыт провайдером. Видеосерверы одного узла
+// YouTube (rr1---sn-xxx … rr6---sn-xxx) стоят в одной подсети и закрыты разом: узнав про один,
+// остальные FI сразу ведёт через воркер.
+func blockKey(host string) string {
+	host = strings.ToLower(strings.TrimSuffix(host, "."))
+	if m := videoNode.FindStringSubmatch(host); m != nil {
+		return m[1]
+	}
+	return host
+}
+
+// tunnelTry — чем закончилась попытка открыть туннель одним из путей.
+type tunnelTry struct {
+	conn   net.Conn
+	answer []byte // первые байты ответа сервера, если путь их дожидался
+	err    error
+	direct bool
+}
+
+// race открывает туннель двумя путями внахлёст: сначала напрямую, а если прямой путь не ответил
+// за hedgeDelay или упал — ещё и через воркер; берётся путь, ответивший первым. Сервер, который
+// помнится закрытым (key), идёт сразу через воркер, и только если воркер подвёл — напрямую.
+// Без воркера остаётся один прямой путь.
+func (p *WebProxy) race(ctx context.Context, key string, direct, worker func(context.Context) tunnelTry) (tunnelTry, error) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel() // опоздавший путь не доделывает подключение; готовым соединениям отмена не мешает
+	hasWorker := p.hasWorker()
+	results := make(chan tunnelTry, 2)
+	pending, directStarted, workerStarted := 0, false, false
+	start := func(isDirect bool) {
+		pending++
+		path := worker
+		if isDirect {
+			path, directStarted = direct, true
+		} else {
+			workerStarted = true
 		}
-		errs = append(errs, fmt.Errorf("напрямую: %w", err))
-		p.markBlocked(host)
+		go func() {
+			r := path(ctx)
+			r.direct = isDirect
+			results <- r
+		}()
 	}
-	if conn, err = p.workerOnly(ctx, host, port); err != nil {
-		return nil, nil, errors.Join(append(errs, err)...)
+	var hedge <-chan time.Time
+	if hasWorker && p.directBlocked(key) {
+		start(false)
+	} else {
+		start(true)
+		if hasWorker {
+			timer := time.NewTimer(hedgeDelay)
+			defer timer.Stop()
+			hedge = timer.C
+		}
 	}
-	if _, err := conn.Write(hello); err != nil {
-		conn.Close()
+	var errs []error
+	for pending > 0 {
+		select {
+		case <-hedge:
+			hedge = nil
+			start(false)
+		case r := <-results:
+			pending--
+			if r.err == nil {
+				if pending > 0 {
+					if !r.direct {
+						// Воркер успел раньше, а напрямую сервер всё молчит: соседние соединения
+						// (браузер открывает их пачкой) идут сразу через воркер. Ответит — reap
+						// снимет отметку.
+						p.markBlocked(key)
+					}
+					go p.reap(results, pending, key) // опоздавший путь уже не нужен
+				}
+				return r, nil
+			}
+			errs = append(errs, r.err)
+			switch {
+			case r.direct:
+				// Не нашёлся адрес — это сбой DNS, а не закрытый сервер: запоминать нечего.
+				if !errors.Is(r.err, errNoAddress) {
+					p.markBlocked(key)
+				}
+				if hasWorker && !workerStarted {
+					hedge = nil
+					start(false) // напрямую не вышло — ждать незачем
+				}
+			case !directStarted:
+				start(true) // воркер подвёл — вдруг сервер уже отвечает сам
+			}
+		}
+	}
+	return tunnelTry{}, errors.Join(errs...)
+}
+
+// errNoAddress — адрес сайта не нашёлся ни в системном DNS, ни через DoH.
+var errNoAddress = errors.New("адрес не найден")
+
+// dialAnswering отправляет приветствие напрямую и ждёт первых байт ответа. Если сервер молчит
+// дольше hedgeDelay, то же приветствие уходит ещё и через воркер, и берётся путь, ответивший
+// первым: приветствие TLS можно отправить дважды, сеанс продолжится с тем сервером, чей ответ
+// получил браузер. answer — уже полученные байты ответа.
+func (p *WebProxy) dialAnswering(ctx context.Context, host string, port int, hello []byte) (net.Conn, []byte, error) {
+	addr := net.JoinHostPort(host, strconv.Itoa(port))
+	r, err := p.race(ctx, blockKey(host),
+		func(ctx context.Context) tunnelTry {
+			dctx, cancel := context.WithTimeout(ctx, webDirectTimeout)
+			conn, err := p.direct(dctx, addr)
+			cancel()
+			if err != nil {
+				return tunnelTry{err: fmt.Errorf("напрямую: %w", err)}
+			}
+			return answering(conn, hello, silentTimeout, "напрямую")
+		},
+		func(ctx context.Context) tunnelTry {
+			conn, err := p.workerOnly(ctx, host, port)
+			if err != nil {
+				return tunnelTry{err: err}
+			}
+			return answering(conn, hello, workerAnswerWait, "через воркер")
+		})
+	if err != nil {
+		if !p.hasWorker() {
+			err = errors.Join(err, errNoWorker)
+		}
 		return nil, nil, err
 	}
-	return conn, nil, nil
+	return r.conn, r.answer, nil
 }
+
+// answering отправляет приветствие и ждёт первых байт ответа: путь годится, только если сервер ответил.
+func answering(conn net.Conn, hello []byte, wait time.Duration, path string) tunnelTry {
+	answer, err := firstAnswer(conn, hello, wait)
+	if err != nil {
+		conn.Close()
+		return tunnelTry{err: fmt.Errorf("%s: %w", path, err)}
+	}
+	return tunnelTry{conn: conn, answer: answer}
+}
+
+// reap дожидается опоздавших путей и закрывает их соединения. Если напрямую сервер так и не
+// ответил, он остаётся закрытым: следующие соединения идут сразу через воркер. Ответил, хоть
+// и медленнее воркера, — отметка снимается.
+func (p *WebProxy) reap(results <-chan tunnelTry, n int, key string) {
+	for range n {
+		r := <-results
+		if r.conn != nil {
+			r.conn.Close()
+		}
+		switch {
+		case !r.direct:
+		case r.err != nil:
+			p.markBlocked(key)
+		default:
+			p.unblock(key)
+		}
+	}
+}
+
+var errNoWorker = errors.New("сайты через воркер работают только со своим Cloudflare Worker")
+
+func (p *WebProxy) hasWorker() bool { return p.Server != nil && p.Server.Worker != "" }
 
 // firstAnswer отправляет данные и ждёт первых байт ответа не дольше wait.
 func firstAnswer(conn net.Conn, data []byte, wait time.Duration) ([]byte, error) {
@@ -333,43 +480,67 @@ func (s *Server) WorkerTLS(ctx context.Context, host string) error {
 	return tc.HandshakeContext(ctx)
 }
 
-// dial открывает TCP до сайта Telegram: напрямую, а если адрес закрыт — через воркер.
+// dial открывает TCP до сайта Telegram: напрямую, а если адрес закрыт — через воркер. Пути идут
+// внахлёст, как у видеосерверов: закрытый адрес не отвечает на подключение секундами, и
+// мини-приложение не должно их ждать.
 func (p *WebProxy) dial(ctx context.Context, host string, port int) (net.Conn, error) {
 	addr := net.JoinHostPort(host, strconv.Itoa(port))
-	var errs []error
-	if !p.directBlocked(host) {
-		dctx, cancel := context.WithTimeout(ctx, webDirectTimeout)
-		conn, err := p.direct(dctx, addr)
-		cancel()
-		if err == nil {
-			return conn, nil
-		}
-		errs = append(errs, fmt.Errorf("напрямую: %w", err))
-		p.markBlocked(host)
-	}
-	if p.Server == nil || p.Server.Worker == "" {
-		return nil, errors.Join(append(errs, errors.New("адрес закрыт провайдером, а свой Cloudflare Worker не задан"))...)
-	}
-	conn, err := p.worker(ctx, host, port)
+	r, err := p.race(ctx, host,
+		func(ctx context.Context) tunnelTry {
+			dctx, cancel := context.WithTimeout(ctx, webDirectTimeout)
+			defer cancel()
+			conn, err := p.direct(dctx, addr)
+			if err != nil {
+				return tunnelTry{err: fmt.Errorf("напрямую: %w", err)}
+			}
+			return tunnelTry{conn: conn}
+		},
+		func(ctx context.Context) tunnelTry {
+			conn, err := p.worker(ctx, host, port)
+			if err != nil {
+				return tunnelTry{err: err}
+			}
+			return tunnelTry{conn: conn}
+		})
 	if err != nil {
-		return nil, errors.Join(append(errs, err)...)
+		if !p.hasWorker() {
+			err = errors.Join(err, errors.New("адрес закрыт провайдером, а свой Cloudflare Worker не задан"))
+		}
+		return nil, err
 	}
-	return conn, nil
+	return r.conn, nil
 }
 
 func (p *WebProxy) workerOnly(ctx context.Context, host string, port int) (net.Conn, error) {
-	if p.Server == nil || p.Server.Worker == "" {
-		return nil, errors.New("сайты через воркер работают только со своим Cloudflare Worker")
+	if !p.hasWorker() {
+		return nil, errNoWorker
 	}
 	return p.worker(ctx, host, port)
 }
 
+// direct подключается к сайту напрямую. Адрес ищет прокси Telegram: с кэшем и через DNS поверх
+// HTTPS, когда системный DNS сайта не знает, — провайдер подменяет ответы обычного DNS, и без
+// этого каждое соединение сразу уходило бы через воркер.
 func (p *WebProxy) direct(ctx context.Context, addr string) (net.Conn, error) {
 	if p.dialDirect != nil {
 		return p.dialDirect(ctx, addr)
 	}
 	var d net.Dialer
-	return d.DialContext(ctx, "tcp4", addr)
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil || p.Server == nil || net.ParseIP(host) != nil {
+		return d.DialContext(ctx, "tcp4", addr)
+	}
+	ips := p.Server.resolve(ctx, host, 0)
+	if len(ips) == 0 {
+		return nil, fmt.Errorf("%s: %w", host, errNoAddress)
+	}
+	var conn net.Conn
+	for _, ip := range ips[:min(len(ips), 2)] {
+		if conn, err = d.DialContext(ctx, "tcp4", net.JoinHostPort(ip, port)); err == nil {
+			return conn, nil
+		}
+	}
+	return nil, err
 }
 
 func (p *WebProxy) worker(ctx context.Context, host string, port int) (net.Conn, error) {
@@ -399,6 +570,12 @@ func (p *WebProxy) markBlocked(host string) {
 		p.blocked = map[string]time.Time{}
 	}
 	p.blocked[host] = time.Now().Add(webDirectPause)
+}
+
+func (p *WebProxy) unblock(host string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	delete(p.blocked, host)
 }
 
 func (p *WebProxy) logf(format string, args ...any) {
@@ -437,16 +614,25 @@ func (s *Server) dialWorkerTCP(ctx context.Context, host string, port int) (net.
 		cancel()
 		if err == nil {
 			ws.raw = true
-			return &wsStream{ws: ws}, nil
+			return newWSStream(ws), nil
 		}
+		// Ответ самого воркера — приговор: через другой адрес Cloudflare он ответит то же.
+		// Отказ самого Cloudflare (ошибка 1034 на адресе, который не обслуживает воркер) — нет:
+		// запрос до воркера не дошёл, и стоит пойти через следующий адрес.
 		var se *statusError
-		switch {
-		case errors.As(err, &se) && se.code == http.StatusBadRequest:
-			return nil, fmt.Errorf("воркер %s не умеет открывать сайты Telegram — обновите его код из FI", s.Worker)
-		case errors.As(err, &se) && se.code == http.StatusBadGateway:
-			return nil, fmt.Errorf("воркер %s не смог подключиться к %s", s.Worker, host)
-		case errors.As(err, &se) && se.code == http.StatusForbidden:
-			return nil, fmt.Errorf("воркер %s не пускает к %s: вставьте в него код из FI («Скопировать код воркера»)", s.Worker, host)
+		if errors.As(err, &se) && !se.fromEdge() {
+			switch se.code {
+			case http.StatusBadRequest:
+				return nil, fmt.Errorf("воркер %s не умеет открывать сайты Telegram — обновите его код из FI", s.Worker)
+			case http.StatusBadGateway:
+				return nil, fmt.Errorf("воркер %s не смог подключиться к %s", s.Worker, host)
+			case http.StatusForbidden:
+				return nil, fmt.Errorf("воркер %s не пускает к %s: вставьте в него код из FI («Скопировать код воркера»)", s.Worker, host)
+			}
+		}
+		s.dropEdge(ip, err)
+		if se != nil && (se.code == http.StatusTooManyRequests || se.cfCode() == 1027) {
+			return nil, fmt.Errorf("воркер %s исчерпал дневной лимит запросов бесплатного тарифа Cloudflare — лимит обнулится в 03:00 по Москве", s.Worker)
 		}
 		errs = append(errs, fmt.Errorf("воркер %s через %s: %w", s.Worker, ip, err))
 	}
@@ -459,6 +645,13 @@ func (s *Server) dialWorkerTCP(ctx context.Context, host string, port int) (net.
 // WorkerVersionWeb — версия кода воркера, которая правильно пересылает данные: версии 1–4
 // неверно разбирали двоичные сообщения WebSocket, и до Telegram доходили не те байты.
 const WorkerVersionWeb = 5
+
+// WorkerVersionFast — версия кода воркера, которая пересылает данные крупными блоками. Прежние
+// гоняли их кусочками по 4 КБ и на быстрой загрузке тратили процессорное время бесплатного
+// тарифа за доли секунды: Cloudflare обрывал соединение без объяснений — то на первых сотнях
+// килобайт, то через сотню мегабайт (замер 2026-11-11, одинаково через провайдера и через VPN).
+// Видео и файлы через воркер поэтому шли рывками.
+const WorkerVersionFast = 7
 
 var workerVersionRe = regexp.MustCompile(`версия (\d+)`)
 
@@ -507,13 +700,78 @@ type wsStream struct {
 	ws   *wsConn
 	buf  []byte
 	once sync.Once
+	done chan struct{}
+	// waiting — с какого времени чтение ждёт данных от воркера; 0 — не ждёт (занято передачей
+	// браузеру). dead — сторож закрыл соединение, потому что оно замерло.
+	waiting atomic.Int64
+	dead    atomic.Bool
+}
+
+// wsPingEvery — сколько соединение с воркером может молчать, прежде чем сторож пошлёт ping,
+// и столько же он ждёт ответа: замершее соединение закрывается через два таких срока.
+var wsPingEvery = 3 * time.Second
+
+func newWSStream(ws *wsConn) *wsStream {
+	s := &wsStream{ws: ws, done: make(chan struct{})}
+	ws.lastRecv.Store(time.Now().UnixNano())
+	go s.watch()
+	return s
+}
+
+// watch — сторож соединения с воркером. Провайдер умеет «замораживать» соединение: оно открыто,
+// а пакеты в обе стороны пропадают, и браузер ждал бы данных, пока система секунд через двадцать
+// не признает соединение мёртвым. Когда чтение ждёт данных дольше wsPingEvery, сторож шлёт ping:
+// Cloudflare отвечает на него сам, за десятую долю секунды. Нет за следующий такой срок ни
+// ответа, ни данных — соединение закрывается, и браузер сразу повторяет запрос по новому.
+func (s *wsStream) watch() {
+	t := time.NewTicker(wsPingEvery / 4)
+	defer t.Stop()
+	var pinged time.Time
+	for {
+		select {
+		case <-s.done:
+			return
+		case now := <-t.C:
+			since := s.waiting.Load()
+			last := time.Unix(0, s.ws.lastRecv.Load())
+			switch {
+			case since == 0 || !last.Before(pinged):
+				// Чтение занято (данные есть, браузер их ещё не забрал) или после ping что-то
+				// пришло — соединение живо.
+				pinged = time.Time{}
+			case !pinged.IsZero():
+				if now.Sub(pinged) >= wsPingEvery && time.Unix(0, since).Before(pinged) {
+					s.dead.Store(true)
+					s.ws.conn.Close()
+					return
+				}
+				continue
+			}
+			if since != 0 && now.Sub(last) >= wsPingEvery {
+				pinged = now
+				if s.ws.writeFrame(opPing, nil) != nil {
+					return
+				}
+			}
+		}
+	}
 }
 
 func (s *wsStream) Read(p []byte) (int, error) {
 	for len(s.buf) == 0 {
+		s.waiting.Store(time.Now().UnixNano())
 		data, err := s.ws.recv()
+		s.waiting.Store(0)
 		s.buf = data
 		if err != nil && len(s.buf) == 0 {
+			switch {
+			case s.dead.Load():
+				return 0, errors.New("соединение с воркером замерло: ни данных, ни ответа на ping")
+			case err == io.EOF && s.ws.closeCode != 0 && s.ws.closeCode != 1000 && s.ws.closeReason != "":
+				// Воркер оборвал соединение сам и назвал причину («tcp: …» — не смог подключиться
+				// к сайту): без неё в журнале был бы голый EOF.
+				return 0, fmt.Errorf("воркер закрыл соединение: %s", s.ws.closeReason)
+			}
 			return 0, err
 		}
 	}
@@ -530,7 +788,12 @@ func (s *wsStream) Write(p []byte) (int, error) {
 }
 
 func (s *wsStream) Close() error {
-	s.once.Do(s.ws.close)
+	s.once.Do(func() {
+		if s.done != nil {
+			close(s.done)
+		}
+		s.ws.close()
+	})
 	return nil
 }
 

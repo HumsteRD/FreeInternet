@@ -16,7 +16,7 @@
 
 import { connect } from "cloudflare:sockets";
 
-const VERSION = 6;
+const VERSION = 7;
 
 // KEY — секрет FI: с ним воркер пускает к любым сайтам, без него — только к Telegram, чтобы
 // воркером не воспользовались как открытым прокси. FI вписывает его сам при копировании кода.
@@ -51,15 +51,27 @@ function isTelegramWeb(host) {
   return WEB.some((d) => host === d || host.endsWith("." + d));
 }
 
+// Адреса сайтов, которые воркер уже искал: браузер открывает к одному видеосерверу много
+// соединений подряд, и каждое заново спрашивало DNS — лишние десятки миллисекунд.
+const DNS_TTL = 5 * 60 * 1000;
+const dnsCache = new Map();
+
 // IPv4-адрес сайта через DNS Cloudflare: подключение из воркера по имени к сайтам Telegram
 // не проходит, по адресу — проходит.
 async function resolveA(host) {
+  const hit = dnsCache.get(host);
+  if (hit && hit.until > Date.now()) return hit.ips;
   try {
     const r = await fetch(`https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(host)}&type=A`, {
       headers: { accept: "application/dns-json" },
     });
     const j = await r.json();
-    return (j.Answer || []).filter((a) => a.type === 1).map((a) => a.data);
+    const ips = (j.Answer || []).filter((a) => a.type === 1).map((a) => a.data);
+    if (ips.length) {
+      if (dnsCache.size > 300) dnsCache.clear();
+      dnsCache.set(host, { ips, until: Date.now() + DNS_TTL });
+    }
+    return ips;
   } catch {
     return [];
   }
@@ -79,6 +91,53 @@ async function bytes(data) {
   if (data && typeof data.arrayBuffer === "function") return new Uint8Array(await data.arrayBuffer());
   if (typeof data === "string") return new TextEncoder().encode(data);
   throw new Error("сообщение неизвестного вида: " + Object.prototype.toString.call(data));
+}
+
+// Сколько байт читать с сайта за один раз. Бесплатный воркер ограничен процессорным временем,
+// и Cloudflare обрывает соединение, когда оно кончается. Версии по 6-ю пересылали данные
+// кусочками по 4 КБ: на быстрой загрузке (видео, файлы) это тысячи вызовов в секунду, и
+// соединения рвались — то на первых сотнях килобайт, то через сотню мегабайт. Крупными блоками
+// вызовов в десятки раз меньше.
+const BLOCK = 256 * 1024;
+
+const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// pump пересылает данные сайта в WebSocket, пока сайт не закроет соединение.
+async function pump(socket, server) {
+  let reader;
+  try {
+    reader = socket.readable.getReader({ mode: "byob" });
+  } catch {
+    // Поток не умеет читать в свой буфер — пересылаем по-старому, кусочками.
+    await socket.readable.pipeTo(
+      new WritableStream({
+        write(chunk) {
+          server.send(chunk);
+        },
+      }),
+    );
+    return;
+  }
+  let buffer = new ArrayBuffer(BLOCK);
+  for (;;) {
+    const { value, done } = await reader.read(new Uint8Array(buffer));
+    if (done) return;
+    const n = value.byteLength;
+    if (n < BLOCK / 4) {
+      // Немного данных (переписка, рукопожатие): отправляем копию, а буфер берём снова.
+      server.send(value.slice());
+      buffer = value.buffer;
+    } else {
+      // Много данных: отправляем сам блок, для следующего чтения нужен новый буфер.
+      server.send(value);
+      buffer = new ArrayBuffer(BLOCK);
+    }
+    // Идёт загрузка: чтение возвращает то, что успело прийти, и без паузы блоки выходили бы
+    // мелкими. За несколько миллисекунд данные копятся в сети — следующий блок крупнее, вызовов
+    // меньше. Отправленное уже ушло, так что ответ сайта пауза не задерживает; мелкие обмены
+    // (меньше 16 КБ) идут без неё.
+    if (n >= 16 * 1024) await pause(n < BLOCK / 2 ? 4 : 1);
+  }
 }
 
 const describe = (d) =>
@@ -198,29 +257,29 @@ export default {
     const writer = socket.writable.getWriter();
     socket.closed.catch((e) => closeWith(1011, "tcp: " + errText(e)));
 
-    // Сообщения пишутся в сокет строго по очереди: разбор некоторых видов асинхронный.
-    let queue = Promise.resolve();
+    // Сообщения пишутся в сокет строго по очереди. Обычное двоичное сообщение пишется сразу;
+    // очередь нужна только сообщениям другого вида, разбор которых асинхронный.
+    let queue = null;
+    const failed = (e) => closeWith(1011, "запись: " + errText(e));
     server.addEventListener("message", (event) => {
       const data = event.data;
-      queue = queue
-        .then(async () => writer.write(await bytes(data)))
-        .catch((e) => closeWith(1011, "запись: " + errText(e)));
+      if (queue === null && data instanceof ArrayBuffer) {
+        writer.write(new Uint8Array(data)).catch(failed);
+        return;
+      }
+      const next = (queue ?? Promise.resolve()).then(async () => writer.write(await bytes(data))).catch(failed);
+      queue = next;
+      next.then(() => {
+        if (queue === next) queue = null;
+      });
     });
     server.addEventListener("close", () => socket.close().catch(() => {}));
     server.addEventListener("error", () => socket.close().catch(() => {}));
 
-    socket.readable
-      .pipeTo(
-        new WritableStream({
-          write(chunk) {
-            server.send(chunk);
-          },
-          close() {
-            closeWith(1000, "сервер закрыл соединение");
-          },
-        }),
-      )
-      .catch((e) => closeWith(1011, "чтение: " + errText(e)));
+    pump(socket, server).then(
+      () => closeWith(1000, "сервер закрыл соединение"),
+      (e) => closeWith(1011, "чтение: " + errText(e)),
+    );
 
     return new Response(null, { status: 101, webSocket: client });
   },

@@ -8,6 +8,11 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os/exec"
+	"regexp"
+	"strconv"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -202,5 +207,137 @@ func TestWorkerRoute(t *testing.T) {
 	}
 	if st := proxy.Stats(); st.Worker != 1 || st.WebSocket != 1 {
 		t.Fatalf("статистика %+v", st)
+	}
+}
+
+// TestWorkerScript прогоняет код воркера на поддельных сокетах (testdata/worker_test.mjs):
+// данные доходят целиком и по порядку, крупными блоками. Нужен Node.js.
+func TestWorkerScript(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("нет Node.js — код воркера не проверен")
+	}
+	out, err := exec.Command(node, "testdata/worker_test.mjs", "cf-worker.js").CombinedOutput()
+	if err != nil {
+		t.Fatalf("код воркера: %v\n%s", err, out)
+	}
+	t.Log(strings.TrimSpace(string(out)))
+}
+
+// TestWorkerVersionMatchesCode: служба сверяет версию воркера с WorkerVersionFast — она должна
+// совпадать с номером в самом коде, иначе окно вечно просило бы обновить воркер.
+func TestWorkerVersionMatchesCode(t *testing.T) {
+	m := regexp.MustCompile(`const VERSION = (\d+);`).FindStringSubmatch(workerSource)
+	if m == nil {
+		t.Fatal("в коде воркера нет номера версии")
+	}
+	if v, _ := strconv.Atoi(m[1]); v != WorkerVersionFast {
+		t.Fatalf("версия в коде воркера %d, а WorkerVersionFast = %d", v, WorkerVersionFast)
+	}
+}
+
+// pingWorker — поддельный воркер для сторожа соединений: принимает WebSocket; пока answer
+// включён, отвечает на ping, а получив команду — присылает данные.
+func pingWorker(t *testing.T, answer *atomic.Bool, send <-chan []byte) {
+	t.Helper()
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, rw, err := w.(http.Hijacker).Hijack()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		rw.WriteString("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n" +
+			"Sec-WebSocket-Accept: " + acceptKey(r.Header.Get("Sec-WebSocket-Key")) + "\r\n\r\n")
+		rw.Flush()
+		peer := &wsConn{conn: conn, br: rw.Reader}
+		go func() {
+			for data := range send {
+				peer.writeFrame(opBinary, data)
+			}
+		}()
+		for {
+			_, op, payload, err := peer.readFrame()
+			if err != nil || op == opClose {
+				return
+			}
+			if op == opPing && answer.Load() {
+				peer.writeFrame(opPong, payload)
+			}
+		}
+	}))
+	t.Cleanup(srv.Close)
+	certs := x509.NewCertPool()
+	certs.AddCert(srv.Certificate())
+	oldCAs, oldPort, oldPing := rootCAs, workerPort, wsPingEvery
+	_, port, _ := net.SplitHostPort(srv.Listener.Addr().String())
+	rootCAs, workerPort, wsPingEvery = certs, port, 60*time.Millisecond
+	t.Cleanup(func() { rootCAs, workerPort, wsPingEvery = oldCAs, oldPort, oldPing })
+}
+
+// TestFrozenWorkerConnIsClosed: соединение с воркером замерло — ни данных, ни ответа на ping.
+// Сторож закрывает его за несколько проверок, а не ждёт системного таймаута в двадцать секунд.
+// Молчащее, но живое соединение (на ping отвечают) не трогает.
+func TestFrozenWorkerConnIsClosed(t *testing.T) {
+	var answer atomic.Bool
+	answer.Store(true)
+	send := make(chan []byte, 1)
+	defer close(send)
+	pingWorker(t, &answer, send)
+	s := &Server{
+		Worker:   "example.com",
+		dnsCache: map[string]dnsEntry{"example.com": {ips: []string{"127.0.0.1"}, at: time.Now()}},
+	}
+	conn, err := s.dialWorkerTCP(context.Background(), "telegram.org", 443)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	// Пока чтение не ждёт данных, сторож соединение не трогает, даже если на ping не отвечают.
+	answer.Store(false)
+	time.Sleep(5 * wsPingEvery)
+	if conn.(*wsStream).dead.Load() {
+		t.Fatal("сторож закрыл соединение, из которого никто не читал")
+	}
+	answer.Store(true)
+
+	// Живое соединение молчит десяток проверок — и остаётся открытым: на ping отвечают.
+	type result struct {
+		data string
+		err  error
+	}
+	read := func() <-chan result {
+		ch := make(chan result, 1)
+		go func() {
+			buf := make([]byte, 64)
+			n, err := conn.Read(buf)
+			ch <- result{string(buf[:n]), err}
+		}()
+		return ch
+	}
+	ch := read()
+	select {
+	case r := <-ch:
+		t.Fatalf("живое молчащее соединение закрыто: %q %v", r.data, r.err)
+	case <-time.After(10 * wsPingEvery):
+	}
+	send <- []byte("данные")
+	if r := <-ch; r.err != nil || r.data != "данные" {
+		t.Fatalf("после молчания: %q %v", r.data, r.err)
+	}
+
+	// Соединение замерло: на ping больше не отвечают.
+	answer.Store(false)
+	start := time.Now()
+	select {
+	case r := <-read():
+		if r.err == nil || !strings.Contains(r.err.Error(), "замерло") {
+			t.Fatalf("замершее соединение: %q %v", r.data, r.err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("замершее соединение не закрыто")
+	}
+	if took := time.Since(start); took > 6*wsPingEvery+500*time.Millisecond {
+		t.Fatalf("сторож ждал %v", took)
 	}
 }

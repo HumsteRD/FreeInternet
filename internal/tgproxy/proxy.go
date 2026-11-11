@@ -19,6 +19,7 @@ const (
 	dialTimeout      = 5 * time.Second
 	failCooldown     = time.Minute // неудачный адрес не пробуем повторно минуту
 	dnsCacheTTL      = 10 * time.Minute
+	dnsCacheMax      = 500 // сколько имён помнить
 	// dnsFailTTL — сколько помнить, что адрес не нашёлся: DNS часто сбоит на минуту при смене
 	// сети или включении VPN, и десятиминутная пауза оставила бы Telegram без запасного пути.
 	dnsFailTTL = 20 * time.Second
@@ -28,7 +29,7 @@ const (
 	raceDelay = 600 * time.Millisecond
 )
 
-// workerPort — порт Cloudflare; в тестах подменяется на адрес поддельного воркера.
+// workerPort — порт Cloudflare (воркер и общие домены); в тестах — порт поддельного сервера.
 var workerPort = "443"
 
 // Адреса веб-серверов Telegram на случай, если DNS не отвечает или подменён (проверены 2026-09-14).
@@ -612,9 +613,11 @@ func workerPath(k poolKey) string {
 // и перекладывает байты в WebSocket. Границы сообщений ему не важны — соединение потоковое.
 func (s *Server) dialWorker(ctx context.Context, k poolKey) (upstream, error) {
 	var errs []error
+	cooling := false
 	for _, ip := range s.cfAddrs(ctx, s.Worker, s.edges(s.Worker)) {
 		key := "worker@" + ip
 		if s.coolingDown(key) {
+			cooling = true
 			continue
 		}
 		dialCtx, cancel := context.WithTimeout(ctx, dialTimeout)
@@ -624,15 +627,19 @@ func (s *Server) dialWorker(ctx context.Context, k poolKey) (upstream, error) {
 			ws.raw, ws.viaWorker = true, true
 			return ws, nil
 		}
-		if ctx.Err() == nil {
+		// Отказавший вход в Cloudflare убирается из быстрых, остальные адреса отдыхают минуту.
+		if !s.dropEdge(ip, err) && ctx.Err() == nil {
 			s.markFailed(key)
 		}
 		errs = append(errs, fmt.Errorf("воркер %s через %s: %w", s.Worker, ip, err))
 	}
-	if len(errs) == 0 {
-		return nil, fmt.Errorf("воркер %s: адрес не найден", s.Worker)
+	switch {
+	case len(errs) > 0:
+		return nil, errors.Join(errs...)
+	case cooling: // адреса есть, но все недавно не ответили: это не «адрес не найден»
+		return nil, fmt.Errorf("воркер %s: все адреса на паузе после ошибок", s.Worker)
 	}
-	return nil, errors.Join(errs...)
+	return nil, fmt.Errorf("воркер %s: адрес не найден", s.Worker)
 }
 
 // NormalizeWorker приводит адрес воркера к домену: из «https://x.workers.dev/» выходит «x.workers.dev».
@@ -731,11 +738,16 @@ func (s *Server) resolve(ctx context.Context, host string, dc int) []string {
 			cancel()
 		}
 		s.mu.Lock()
-		if s.dnsCache == nil {
+		// Через кэш идут и видеосерверы YouTube, а их имён сотни: кэш не растёт без конца.
+		if s.dnsCache == nil || len(s.dnsCache) > dnsCacheMax {
 			s.dnsCache = map[string]dnsEntry{}
 		}
-		if s.lastGood == nil {
+		if s.lastGood == nil || len(s.lastGood) > dnsCacheMax {
+			worker := s.lastGood[s.Worker] // адреса воркера нужны и после сброса
 			s.lastGood = map[string][]string{}
+			if len(worker) > 0 {
+				s.lastGood[s.Worker] = worker
+			}
 		}
 		switch {
 		case len(entry.ips) > 0:

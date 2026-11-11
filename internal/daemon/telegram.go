@@ -36,6 +36,9 @@ type TelegramStatus struct {
 	MiniAppsError string `json:"mini_apps_error,omitempty"`
 	// WorkerOutdated — код воркера старый: сайты Telegram для мини-приложений он не откроет.
 	WorkerOutdated bool `json:"worker_outdated,omitempty"`
+	// WorkerSlow — код воркера работает, но пересылает данные мелкими кусками: Cloudflare обрывает
+	// из-за этого быстрые загрузки (видео, файлы). Окно советует обновить код.
+	WorkerSlow bool `json:"worker_slow,omitempty"`
 	// WorkerKeyOK — в воркере код с ключом FI (нужен сайтам через воркер); nil — не проверяли.
 	WorkerKeyOK *bool `json:"worker_key_ok,omitempty"`
 	// SitesPAC — PAC для браузеров, пока сайты через воркер работают: окно ставит его в Windows.
@@ -90,6 +93,7 @@ func (d *Daemon) telegramStatusLocked() TelegramStatus {
 	}
 	if st.Enabled && st.Worker != "" {
 		st.WorkerOutdated = d.workerVer > 0 && d.workerVer < tgproxy.WorkerVersionWeb
+		st.WorkerSlow = d.workerVer >= tgproxy.WorkerVersionWeb && d.workerVer < tgproxy.WorkerVersionFast
 		if len(d.cfg.ViaWorker) > 0 || d.cfg.YouTubeViaWorker {
 			st.WorkerKeyOK = d.workerKeyOK
 			if d.cfg.ViaWorkerBrowsers && d.web != nil && d.web.Listening() {

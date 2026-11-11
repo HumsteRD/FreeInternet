@@ -71,31 +71,33 @@ type Status struct {
 	Custom       []string `json:"custom_strategies"`
 	ViaWorker    []string `json:"via_worker"` // сайты через воркер
 	// ViaWorkerBrowsers — FI ставит в Windows сценарий прокси, чтобы сайты через воркер шли и в браузерах.
-	ViaWorkerBrowsers bool            `json:"via_worker_browsers"`
-	YouTubeViaWorker  bool            `json:"youtube_via_worker"` // свежие ролики YouTube через воркер
-	Ipset             lists.IpsetMode `json:"ipset"`
-	PausedUntil       time.Time       `json:"paused_until,omitzero"` // обход на паузе: когда включится сам
-	Presets           []PresetStatus  `json:"presets"`
-	GameMode          string          `json:"game_mode"`
-	Games             []string        `json:"games"`
-	GameList          []strategy.Game `json:"game_profiles"`
-	AutoFix           bool            `json:"auto_fix"`
-	Error             string          `json:"error,omitempty"`
-	Conflict          []string        `json:"conflict,omitempty"`    // другие обходы, из-за которых движок не запущен
-	VPN               string          `json:"vpn,omitempty"`         // интернет идёт через этот VPN: проверки видят его сеть
-	AntiCheat         string          `json:"anti_cheat,omitempty"`  // идёт игра с этим античитом: обход не перезапускается
-	QUICOff           bool            `json:"browser_quic_off"`      // FI запретил браузерам QUIC
-	QUICAuto          bool            `json:"quic_auto"`             // FI может запретить QUIC сам
-	DNSProblem        bool            `json:"dns_problem"`           // системный DNS не отвечает
-	PublicDNS         bool            `json:"public_dns"`            // FI переключил адаптер на публичный DNS
-	SelectNote        string          `json:"select_note,omitempty"` // почему последний подбор прерван или что он исправил
-	Task              *Task           `json:"task,omitempty"`
-	Services          []Service       `json:"services"`
-	CheckedAt         time.Time       `json:"checked_at,omitzero"`
-	Sites             []config.Site   `json:"sites"`
-	Telegram          TelegramStatus  `json:"telegram"`
-	Base              BaseStatus      `json:"base"`
-	App               AppStatus       `json:"app"`
+	ViaWorkerBrowsers bool `json:"via_worker_browsers"`
+	YouTubeViaWorker  bool `json:"youtube_via_worker"` // свежие ролики YouTube через воркер
+	// YouTubeBlocked — провайдер закрыл по адресу видеосервер YouTube: окно предлагает воркер.
+	YouTubeBlocked bool            `json:"youtube_blocked"`
+	Ipset          lists.IpsetMode `json:"ipset"`
+	PausedUntil    time.Time       `json:"paused_until,omitzero"` // обход на паузе: когда включится сам
+	Presets        []PresetStatus  `json:"presets"`
+	GameMode       string          `json:"game_mode"`
+	Games          []string        `json:"games"`
+	GameList       []strategy.Game `json:"game_profiles"`
+	AutoFix        bool            `json:"auto_fix"`
+	Error          string          `json:"error,omitempty"`
+	Conflict       []string        `json:"conflict,omitempty"`    // другие обходы, из-за которых движок не запущен
+	VPN            string          `json:"vpn,omitempty"`         // интернет идёт через этот VPN: проверки видят его сеть
+	AntiCheat      string          `json:"anti_cheat,omitempty"`  // идёт игра с этим античитом: обход не перезапускается
+	QUICOff        bool            `json:"browser_quic_off"`      // FI запретил браузерам QUIC
+	QUICAuto       bool            `json:"quic_auto"`             // FI может запретить QUIC сам
+	DNSProblem     bool            `json:"dns_problem"`           // системный DNS не отвечает
+	PublicDNS      bool            `json:"public_dns"`            // FI переключил адаптер на публичный DNS
+	SelectNote     string          `json:"select_note,omitempty"` // почему последний подбор прерван или что он исправил
+	Task           *Task           `json:"task,omitempty"`
+	Services       []Service       `json:"services"`
+	CheckedAt      time.Time       `json:"checked_at,omitzero"`
+	Sites          []config.Site   `json:"sites"`
+	Telegram       TelegramStatus  `json:"telegram"`
+	Base           BaseStatus      `json:"base"`
+	App            AppStatus       `json:"app"`
 }
 
 type Daemon struct {
@@ -184,7 +186,7 @@ func New(dataDir string, log *slog.Logger) (*Daemon, error) {
 		prober:  probe.New(),
 		cfg:     cfg,
 		runCtx:  context.Background(),
-		http:    &http.Client{Timeout: 5 * time.Minute},
+		http:    &http.Client{Timeout: 5 * time.Minute, Transport: probe.Transport()},
 	}
 	d.baseStrategies, d.base, d.baseErr = loadBase(cfg.BaseDir)
 	d.loadCustom()
@@ -267,6 +269,7 @@ func (d *Daemon) Status() Status {
 		ViaWorker:         slices.Clone(d.cfg.ViaWorker),
 		ViaWorkerBrowsers: d.cfg.ViaWorkerBrowsers,
 		YouTubeViaWorker:  d.cfg.YouTubeViaWorker,
+		YouTubeBlocked:    youtubeBlocked(d.lastResults),
 		Ipset:             d.cfg.Ipset,
 		PausedUntil:       d.cfg.PausedUntil,
 		Presets:           d.presetStatusLocked(),

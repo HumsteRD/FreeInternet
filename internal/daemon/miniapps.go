@@ -72,8 +72,11 @@ func (d *Daemon) checkWorkerVersion(ctx context.Context, worker string) {
 		return
 	}
 	d.workerVer, d.workerRetries = ver, 0
-	if ver < tgproxy.WorkerVersionWeb {
+	switch {
+	case ver < tgproxy.WorkerVersionWeb:
 		d.log.Warn("код воркера устарел — мини-приложения через него не откроются", "worker", worker, "version", ver)
+	case ver < tgproxy.WorkerVersionFast:
+		d.log.Warn("код воркера стоит обновить: Cloudflare обрывает через него быстрые загрузки (видео, файлы)", "worker", worker, "version", ver)
 	}
 	if len(d.cfg.ViaWorker) > 0 || d.cfg.YouTubeViaWorker {
 		key := d.cfg.Telegram.WorkerKey

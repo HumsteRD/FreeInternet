@@ -10,6 +10,7 @@
 | `cmd/fi-probe` | стенд: сравнивает стратегии на настоящих сайтах |
 | `cmd/fi-res` | значки и ресурсы Windows для сборки |
 | `cmd/fi-sign` | ключи и подпись обновлений |
+| `cmd/fi-ctl` | команда запущенной службе из консоли, для отладки: `fi-ctl status`, `fi-ctl set_strategy {"name":"general (ALT13)"}` |
 | `internal/daemon` | ядро службы: настройки, проверки, подбор, сайты, Telegram |
 | `internal/tgproxy` | MTProto-прокси: WebSocket веб-версии, Cloudflare, пул соединений |
 | `internal/probe`, `internal/selector`, `internal/autoselect` | проверки сайтов и выбор стратегии |

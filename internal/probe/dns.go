@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"time"
 )
 
 // DoH-серверы указаны по IP, чтобы проверка не зависела от системного DNS.
@@ -73,6 +74,49 @@ type dohAnswer struct {
 
 // LookupDoH — IPv4-адрес хоста через DNS поверх HTTPS, мимо системного DNS.
 func LookupDoH(ctx context.Context, host string) (string, error) { return lookupDoH(ctx, host) }
+
+// dohWait — сколько ждать DoH, когда системный DNS хоста не нашёл.
+const dohWait = 5 * time.Second
+
+// Подмены для тестов.
+var (
+	systemDial = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		d := net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}
+		return d.DialContext(ctx, network, addr)
+	}
+	dohLookup = lookupDoH
+)
+
+// DialContext подключается к addr; если системный DNS не знает хост, адрес ищется через DoH.
+// Провайдер подменяет ответы обычного DNS («такого сайта нет» — у одного провайдера так было
+// с www.youtube.com, raw.githubusercontent.com и workers.dev), и запросы самой службы без этого
+// не доходили: не определялся запасной видеосервер YouTube, не обновлялся список доменов
+// Cloudflare, воркер считался пропавшим. Сертификат всё равно проверяется по имени сайта.
+func DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	conn, err := systemDial(ctx, network, addr)
+	var dnsErr *net.DNSError
+	if err == nil || !errors.As(err, &dnsErr) {
+		return conn, err
+	}
+	host, port, splitErr := net.SplitHostPort(addr)
+	if splitErr != nil || net.ParseIP(host) != nil {
+		return nil, err
+	}
+	dohCtx, cancel := context.WithTimeout(ctx, dohWait)
+	ip, dohErr := dohLookup(dohCtx, host)
+	cancel()
+	if dohErr != nil {
+		return nil, err
+	}
+	return systemDial(ctx, network, net.JoinHostPort(ip, port))
+}
+
+// Transport — транспорт HTTP для запросов самой службы: как обычный, но с DialContext.
+func Transport() *http.Transport {
+	t := http.DefaultTransport.(*http.Transport).Clone()
+	t.DialContext = DialContext
+	return t
+}
 
 func lookupDoH(ctx context.Context, host string) (string, error) {
 	var errs []error
