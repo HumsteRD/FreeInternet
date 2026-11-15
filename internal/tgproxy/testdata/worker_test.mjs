@@ -35,9 +35,21 @@ const fail = (msg) => {
 };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-// В Cloudflare у читателя есть readAtLeast; в Node то же самое делает read с параметром min.
-ReadableStreamBYOBReader.prototype.readAtLeast = function (min, view) {
-  return this.read(view, { min });
+// В Cloudflare у читателя есть readAtLeast; в Node его нет. Параметр min у read появился только
+// в Node 21.7, а тест должен идти и на более старом — поэтому дочитываем сами, чтением за чтением.
+ReadableStreamBYOBReader.prototype.readAtLeast = async function (min, view) {
+  let buffer = view.buffer;
+  const start = view.byteOffset;
+  const size = view.byteLength;
+  let filled = 0;
+  for (;;) {
+    const { value, done } = await this.read(new Uint8Array(buffer, start + filled, size - filled));
+    if (value) {
+      filled += value.byteLength;
+      buffer = value.buffer;
+    }
+    if (done || filled >= min) return { value: new Uint8Array(buffer, start, filled), done };
+  }
 };
 
 // ─── Поддельные сокет и WebSocket ───────────────────────────────────────

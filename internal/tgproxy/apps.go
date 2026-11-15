@@ -38,7 +38,7 @@ type AppProxy struct {
 type AppProxyStats struct {
 	Listening bool      `json:"listening"`
 	Conns     int       `json:"conns"`                // открытых соединений всего
-	Direct    int       `json:"direct,omitempty"`     // из них мимо воркера: сайт стоит за Cloudflare
+	Direct    int       `json:"direct,omitempty"`     // из них мимо воркера: воркер к сайту не подключается
 	Failed    int       `json:"failed"`               // не открывшихся
 	LastUsed  time.Time `json:"last_used,omitzero"`   // когда программа обращалась последний раз
 	LastError string    `json:"last_error,omitempty"` // почему не открылось последнее
@@ -204,11 +204,11 @@ func (p *AppProxy) open(ctx context.Context, host string, port int) (net.Conn, e
 	if p.Server == nil || p.Server.Worker == "" {
 		return nil, errNoWorker
 	}
-	if p.Server.BehindCloudflare(ctx, host) {
+	if p.Server.WorkerCantReach(ctx, host) {
 		return p.direct(ctx, host, port)
 	}
 	conn, err := p.Server.dialWorkerTCP(ctx, host, port)
-	if errors.Is(err, ErrBehindCloudflare) {
+	if errors.Is(err, ErrBehindCloudflare) || errors.Is(err, errWorkerRefused) {
 		return p.direct(ctx, host, port)
 	}
 	return conn, err

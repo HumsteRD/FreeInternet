@@ -1377,7 +1377,7 @@ function cfPrograms(st) {
     const viaWorker = Math.max(0, (p.conns ?? 0) - (p.direct ?? 0));
     notes.push(
       `<p class="note">Через Cloudflare прошло ${count(viaWorker)} ${plural(viaWorker, 'соединение', 'соединения', 'соединений')} программ${
-        p.direct ? `, напрямую — ${count(p.direct)} (сайты за Cloudflare)` : ''
+        p.direct ? `, напрямую — ${count(p.direct)} (к этим сайтам воркер не подключается: обычно они сами стоят за Cloudflare)` : ''
       }${p.failed ? `, не открылось ${count(p.failed)}${p.last_error ? ` — ${esc(p.last_error)}` : ''}` : ''}.</p>`,
     );
   }

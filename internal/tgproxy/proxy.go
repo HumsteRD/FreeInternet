@@ -110,7 +110,7 @@ type Server struct {
 	workerPausedUntil time.Time // воркер молча закрывал соединения — до этого времени в обход него
 	// cantReach — сайты, к которым воркер подключиться не может (стоят за Cloudflare), и до
 	// какого времени это помнить: см. cfnet.go.
-	cantReach map[string]time.Time
+	cantReach map[string]unreachable
 	// plainPump — просить воркер пересылать данные сайтов по мере прихода, без чтения записями
 	// TLS: проверка VerifyPump показала, что быстрая пересылка в этом воркере не работает.
 	plainPump atomic.Bool

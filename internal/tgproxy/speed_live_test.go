@@ -37,6 +37,9 @@ func TestLiveWorkerSpeed(t *testing.T) {
 	for _, fast := range []bool{false, true} {
 		srv := &Server{Worker: worker, WorkerKey: key}
 		srv.edge.host, srv.edge.at = worker, time.Now() // без быстрых входов: только DNS
+		// FI_SPEED_PLAIN — простая пересылка в воркере (p=0), как в коде до восьмой версии: так
+		// видно, виноват ли в сбое способ пересылки или сам сайт.
+		srv.plainPump.Store(os.Getenv("FI_SPEED_PLAIN") != "")
 		name := "адреса из DNS"
 		if fast {
 			srv.edge.list, _ = pickEdges(context.Background(), worker, edgeCandidates)

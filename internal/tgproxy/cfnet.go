@@ -54,8 +54,13 @@ func IsCloudflareIP(ip net.IP) bool {
 	return false
 }
 
-// ErrBehindCloudflare — до сайта воркер не дотянется.
+// ErrBehindCloudflare — сайт стоит за Cloudflare, и воркер к нему не подключится.
 var ErrBehindCloudflare = errors.New("сайт стоит за Cloudflare, а воркер Cloudflare к таким не подключается")
+
+// errWorkerRefused — Cloudflare не дал воркеру подключиться к сайту, хотя адрес не из его
+// диапазонов: порт закрыт, сервер не отвечает. Тем же ответом Cloudflare встречает и свои адреса,
+// поэтому причину FI уточняет по адресу сайта.
+var errWorkerRefused = errors.New("воркер не смог подключиться к сайту")
 
 const (
 	// behindCFFor — сколько помнить, что сайт стоит за Cloudflare: хостинг меняют редко.
@@ -66,6 +71,13 @@ const (
 	cantReachMax = 2000
 )
 
+// unreachable — воркер к сайту не подключится до времени until; cloudflare — потому что сайт
+// стоит за Cloudflare, а не потому, что сервер сейчас не отвечает.
+type unreachable struct {
+	until      time.Time
+	cloudflare bool
+}
+
 // refusedByPlatform — воркер закрыл соединение, потому что Cloudflare не дал ему подключиться
 // к адресу сайта.
 func refusedByPlatform(reason string) bool {
@@ -74,39 +86,57 @@ func refusedByPlatform(reason string) bool {
 
 func hostKey(host string) string { return strings.ToLower(strings.TrimSuffix(host, ".")) }
 
-func (s *Server) noteCantReach(host string, d time.Duration) {
+func (s *Server) noteCantReach(host string, d time.Duration, cloudflare bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.cantReach == nil || len(s.cantReach) > cantReachMax {
-		s.cantReach = map[string]time.Time{}
+		s.cantReach = map[string]unreachable{}
 	}
-	s.cantReach[hostKey(host)] = time.Now().Add(d)
+	s.cantReach[hostKey(host)] = unreachable{until: time.Now().Add(d), cloudflare: cloudflare}
 }
 
-// workerCantReach — помнится, что воркер к этому сайту подключиться не может.
-func (s *Server) workerCantReach(host string) bool {
+// workerCantReach — помнится, что воркер к этому сайту подключиться не может; cloudflare —
+// потому что сайт стоит за Cloudflare.
+func (s *Server) workerCantReach(host string) (cant, cloudflare bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return time.Now().Before(s.cantReach[hostKey(host)])
+	u := s.cantReach[hostKey(host)]
+	if !time.Now().Before(u.until) {
+		return false, false
+	}
+	return true, u.cloudflare
+}
+
+// cantReachError — почему воркер к сайту не подключится; nil — такого не помнится.
+func (s *Server) cantReachError(host string) error {
+	cant, cloudflare := s.workerCantReach(host)
+	switch {
+	case !cant:
+		return nil
+	case cloudflare:
+		return fmt.Errorf("%s: %w", host, ErrBehindCloudflare)
+	}
+	return fmt.Errorf("%s: %w", host, errWorkerRefused)
 }
 
 // refused — Cloudflare не дал воркеру подключиться к сайту. Ближайшие минуты сайт через воркер
-// не водим; если его адреса из диапазонов Cloudflare — это надолго.
-func (s *Server) refused(host string) {
-	if s.workerCantReach(host) {
-		return
+// не водим; если его адреса из диапазонов Cloudflare — это надолго. Возвращает причину.
+func (s *Server) refused(host string) error {
+	if err := s.cantReachError(host); err != nil {
+		return err
 	}
-	s.noteCantReach(host, refusedFor)
+	s.noteCantReach(host, refusedFor, false)
 	if s.Log != nil {
-		s.Log.Info("воркер не смог подключиться к сайту: Cloudflare не пускает воркеры к адресам самого Cloudflare — дальше этот сайт идёт мимо воркера", "site", host)
+		s.Log.Info("воркер не смог подключиться к сайту — ближайшие минуты этот сайт идёт мимо воркера", "site", host)
 	}
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 		defer cancel()
 		if s.allCloudflare(s.lookupIPs(ctx, host)) {
-			s.noteCantReach(host, behindCFFor)
+			s.noteCantReach(host, behindCFFor, true)
 		}
 	}()
+	return fmt.Errorf("%s: %w", host, errWorkerRefused)
 }
 
 // allCloudflare — у сайта есть адреса, и все они принадлежат Cloudflare.
@@ -127,12 +157,11 @@ func (s *Server) lookupIPs(ctx context.Context, host string) []string {
 	return s.resolve(ctx, host, 0)
 }
 
-// BehindCloudflare — воркер до сайта не дотянется: все его адреса принадлежат Cloudflare, или
-// воркер недавно сам не смог к нему подключиться. Адрес ищется с кэшем, так что повторный
-// вопрос ничего не стоит.
+// BehindCloudflare — сайт сам стоит за Cloudflare: все его адреса принадлежат Cloudflare. Воркер
+// к такому не подключится никогда. Адрес ищется с кэшем, так что повторный вопрос ничего не стоит.
 func (s *Server) BehindCloudflare(ctx context.Context, host string) bool {
 	host = hostKey(host)
-	if s.workerCantReach(host) {
+	if cant, cloudflare := s.workerCantReach(host); cant && cloudflare {
 		return true
 	}
 	if ip := net.ParseIP(host); ip != nil {
@@ -141,11 +170,20 @@ func (s *Server) BehindCloudflare(ctx context.Context, host string) bool {
 	if !s.allCloudflare(s.lookupIPs(ctx, host)) {
 		return false
 	}
-	s.noteCantReach(host, behindCFFor)
+	s.noteCantReach(host, behindCFFor, true)
 	return true
 }
 
-// KnownBehindCloudflare — какие из сайтов помнятся недоступными для воркера. В сеть не ходит:
+// WorkerCantReach — вести сайт через воркер сейчас бессмысленно: он стоит за Cloudflare или
+// воркер только что не смог к нему подключиться.
+func (s *Server) WorkerCantReach(ctx context.Context, host string) bool {
+	if cant, _ := s.workerCantReach(host); cant {
+		return true
+	}
+	return s.BehindCloudflare(ctx, host)
+}
+
+// KnownBehindCloudflare — какие из сайтов, как помнится, стоят за Cloudflare. В сеть не ходит:
 // годится для статуса, который окно спрашивает каждые несколько секунд.
 func (s *Server) KnownBehindCloudflare(hosts []string) []string {
 	s.mu.Lock()
@@ -153,7 +191,7 @@ func (s *Server) KnownBehindCloudflare(hosts []string) []string {
 	var out []string
 	now := time.Now()
 	for _, h := range hosts {
-		if now.Before(s.cantReach[hostKey(h)]) {
+		if u := s.cantReach[hostKey(h)]; u.cloudflare && now.Before(u.until) {
 			out = append(out, h)
 		}
 	}

@@ -554,12 +554,12 @@ func (p *WebProxy) dial(ctx context.Context, host string, port int) (net.Conn, e
 	return r.conn, nil
 }
 
-// cantUseWorker — воркер до сайта не дотянется (сайт стоит за Cloudflare).
+// cantUseWorker — воркер до сайта не дотянется: сайт стоит за Cloudflare или не отвечает ему.
 func (p *WebProxy) cantUseWorker(ctx context.Context, host string) bool {
 	if p.Server == nil || p.dialWorker != nil { // в тестах воркер подменён и открывает всё
 		return false
 	}
-	return p.Server.BehindCloudflare(ctx, host)
+	return p.Server.WorkerCantReach(ctx, host)
 }
 
 func (p *WebProxy) workerOnly(ctx context.Context, host string, port int) (net.Conn, error) {
@@ -662,8 +662,8 @@ func (s *Server) dialWorkerTCPWith(ctx context.Context, host string, port int, p
 	if s.workerLimited() {
 		return nil, s.limitError()
 	}
-	if s.workerCantReach(host) {
-		return nil, fmt.Errorf("%s: %w", host, ErrBehindCloudflare)
+	if err := s.cantReachError(host); err != nil {
+		return nil, err
 	}
 	path := fmt.Sprintf("/?host=%s&port=%d", url.QueryEscape(host), port)
 	if s.WorkerKey != "" {
@@ -683,7 +683,7 @@ func (s *Server) dialWorkerTCPWith(ctx context.Context, host string, port int, p
 		if err == nil {
 			ws.raw, ws.onCut = true, s.noteCut
 			stream := newWSStream(ws)
-			stream.onRefused = func() { s.refused(host) }
+			stream.onRefused = func() error { return s.refused(host) }
 			return stream, nil
 		}
 		// Ответ самого воркера — приговор: через другой адрес Cloudflare он ответит то же.
@@ -782,8 +782,9 @@ type wsStream struct {
 	// браузеру). dead — сторож закрыл соединение, потому что оно замерло.
 	waiting atomic.Int64
 	dead    atomic.Bool
-	// onRefused — Cloudflare не дал воркеру подключиться к сайту: прокси это запоминает.
-	onRefused func()
+	// onRefused — Cloudflare не дал воркеру подключиться к сайту: прокси это запоминает и
+	// называет причину (сайт за Cloudflare или сервер не отвечает).
+	onRefused func() error
 }
 
 // wsPingEvery — сколько соединение с воркером может молчать, прежде чем сторож пошлёт ping,
@@ -849,11 +850,8 @@ func (s *wsStream) Read(p []byte) (int, error) {
 			case err == io.EOF && s.ws.closeCode != 0 && s.ws.closeCode != 1000 && s.ws.closeReason != "":
 				// Воркер оборвал соединение сам и назвал причину («tcp: …» — не смог подключиться
 				// к сайту): без неё в журнале был бы голый EOF.
-				if refusedByPlatform(s.ws.closeReason) {
-					if s.onRefused != nil {
-						s.onRefused()
-					}
-					return 0, fmt.Errorf("%w (%s)", ErrBehindCloudflare, s.ws.closeReason)
+				if refusedByPlatform(s.ws.closeReason) && s.onRefused != nil {
+					return 0, fmt.Errorf("%w (%s)", s.onRefused(), s.ws.closeReason)
 				}
 				return 0, fmt.Errorf("воркер закрыл соединение: %s", s.ws.closeReason)
 			}

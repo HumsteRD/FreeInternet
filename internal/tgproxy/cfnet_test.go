@@ -116,18 +116,55 @@ func TestWorkerRefusalRemembered(t *testing.T) {
 	}
 	_, err = conn.Read(make([]byte, 16))
 	conn.Close()
-	if !errors.Is(err, ErrBehindCloudflare) {
+	if !errors.Is(err, errWorkerRefused) {
 		t.Fatalf("отказ Cloudflare не узнан: %v", err)
 	}
-	if _, err := s.dialWorkerTCP(ctx, "cf.example", 443); !errors.Is(err, ErrBehindCloudflare) || hits != 1 {
+	if _, err := s.dialWorkerTCP(ctx, "cf.example", 443); !errors.Is(err, errWorkerRefused) || hits != 1 {
 		t.Fatalf("повторное обращение ушло к воркеру: запросов %d, %v", hits, err)
 	}
-	if !s.BehindCloudflare(ctx, "cf.example") {
+	if !s.WorkerCantReach(ctx, "cf.example") {
 		t.Fatal("сайт должен помниться недоступным для воркера")
 	}
+	// Адрес сайта не у Cloudflare: это «сервер не отвечает», а не «сайт стоит за Cloudflare» —
+	// человеку нельзя говорить про Cloudflare то, чего нет.
+	if s.BehindCloudflare(ctx, "cf.example") || len(s.KnownBehindCloudflare([]string{"cf.example"})) != 0 {
+		t.Fatal("сайт с адресом не из Cloudflare назван сайтом за Cloudflare")
+	}
 	// Другие сайты это не задевает.
-	if s.workerCantReach("other.example") {
+	if cant, _ := s.workerCantReach("other.example"); cant {
 		t.Fatal("отказ распространился на другой сайт")
+	}
+}
+
+// TestWorkerRefusalBehindCloudflare: воркер отказал, и адреса сайта — из диапазонов Cloudflare:
+// это надолго, и окно может сказать об этом прямо.
+func TestWorkerRefusalBehindCloudflare(t *testing.T) {
+	hits := 0
+	refusingWorker(t, &hits)
+	s := &Server{
+		Worker:    "example.com",
+		dnsCache:  map[string]dnsEntry{"example.com": {ips: []string{"127.0.0.1"}, at: time.Now()}},
+		LookupIPs: func(context.Context, string) []string { return []string{"162.159.137.232"} },
+	}
+	ctx := context.Background()
+	conn, err := s.dialWorkerTCP(ctx, "cf.example", 443)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn.Read(make([]byte, 16))
+	conn.Close()
+	// Адрес сайта уточняется в фоне.
+	for range 100 {
+		if len(s.KnownBehindCloudflare([]string{"cf.example"})) == 1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := s.KnownBehindCloudflare([]string{"cf.example"}); len(got) != 1 {
+		t.Fatal("сайт за Cloudflare не узнан после отказа воркера")
+	}
+	if _, err := s.dialWorkerTCP(ctx, "cf.example", 443); !errors.Is(err, ErrBehindCloudflare) || hits != 1 {
+		t.Fatalf("повторное обращение: запросов к воркеру %d, %v", hits, err)
 	}
 }
 
@@ -182,7 +219,7 @@ func TestAppProxyDirectBehindCloudflare(t *testing.T) {
 	}
 
 	// Сайт, про который известно заранее (адреса из диапазонов Cloudflare), к воркеру не идёт вовсе.
-	s.noteCantReach("known.example", time.Hour)
+	s.noteCantReach("known.example", time.Hour, true)
 	if conn, err := p.open(context.Background(), "known.example", port); err != nil || hits != 1 {
 		t.Fatalf("известный сайт за Cloudflare: %v, запросов к воркеру %d", err, hits)
 	} else {
