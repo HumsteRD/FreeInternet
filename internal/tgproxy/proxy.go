@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -91,6 +92,8 @@ type Server struct {
 
 	// wsUpstream — подмена подключения по WebSocket в тестах.
 	wsUpstream func(ctx context.Context, k poolKey) (upstream, error)
+	// LookupIPs — подмена поиска адресов сайта (для тестов); nil — системный DNS с кэшем и запасным поиском.
+	LookupIPs func(ctx context.Context, host string) []string
 
 	mu       sync.Mutex
 	stats    Stats
@@ -105,8 +108,15 @@ type Server struct {
 	active   map[upstream]struct{} // соединения с Telegram, через которые сейчас идут данные
 
 	workerPausedUntil time.Time // воркер молча закрывал соединения — до этого времени в обход него
+	// cantReach — сайты, к которым воркер подключиться не может (стоят за Cloudflare), и до
+	// какого времени это помнить: см. cfnet.go.
+	cantReach map[string]time.Time
+	// plainPump — просить воркер пересылать данные сайтов по мере прихода, без чтения записями
+	// TLS: проверка VerifyPump показала, что быстрая пересылка в этом воркере не работает.
+	plainPump atomic.Bool
 
-	edge edgeState // быстрые входы в Cloudflare
+	edge  edgeState  // быстрые входы в Cloudflare
+	usage usageState // расход бесплатного тарифа Cloudflare: запросы за сутки, лимит, обрывы
 
 	cfMu      sync.Mutex
 	cfList    []string       // общие домены Cloudflare
@@ -510,12 +520,19 @@ func (s *Server) dialUpstream(ctx context.Context, k poolKey) (upstream, error) 
 }
 
 // routeOrder — пути по очереди: недавний победитель первым, остальные — воркер, WebSocket, Cloudflare.
+// Воркер с исчерпанным суточным лимитом пропускается, а когда запросов осталось мало — идёт
+// последним: Telegram дойдёт и другим путём, а сайтам через воркер идти больше некуда.
 func (s *Server) routeOrder() []dialRoute {
 	var routes []dialRoute
-	if s.Worker != "" && !s.workerPaused() {
+	worker := s.Worker != "" && !s.workerPaused() && !s.workerLimited()
+	saving := worker && s.workerSaving()
+	if worker && !saving {
 		routes = append(routes, dialRoute{"worker", s.dialWorker})
 	}
 	routes = append(routes, dialRoute{"ws", s.dialWebSocket}, dialRoute{"cf", s.dialCF})
+	if saving {
+		return append(routes, dialRoute{"worker", s.dialWorker})
+	}
 	pref := s.preferred()
 	if i := slices.IndexFunc(routes, func(r dialRoute) bool { return r.name == pref }); i > 0 {
 		r := routes[i]
@@ -612,6 +629,9 @@ func workerPath(k poolKey) string {
 // dialWorker подключается к Telegram через Cloudflare Worker: тот открывает TCP до дата-центра
 // и перекладывает байты в WebSocket. Границы сообщений ему не важны — соединение потоковое.
 func (s *Server) dialWorker(ctx context.Context, k poolKey) (upstream, error) {
+	if s.workerLimited() {
+		return nil, s.limitError()
+	}
 	var errs []error
 	cooling := false
 	for _, ip := range s.cfAddrs(ctx, s.Worker, s.edges(s.Worker)) {
@@ -623,8 +643,11 @@ func (s *Server) dialWorker(ctx context.Context, k poolKey) (upstream, error) {
 		dialCtx, cancel := context.WithTimeout(ctx, dialTimeout)
 		ws, err := dialWS(dialCtx, net.JoinHostPort(ip, workerPort), s.Worker, workerPath(k))
 		cancel()
+		if s.noteWorkerDial(err) {
+			return nil, s.limitError() // лимит один на все адреса: другой адрес ответит тем же
+		}
 		if err == nil {
-			ws.raw, ws.viaWorker = true, true
+			ws.raw, ws.viaWorker, ws.onCut = true, true, s.noteCut
 			return ws, nil
 		}
 		// Отказавший вход в Cloudflare убирается из быстрых, остальные адреса отдыхают минуту.

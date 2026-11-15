@@ -49,7 +49,10 @@ func (d *Daemon) AddViaWorker(input string) error {
 		return fmt.Errorf("%s — сайт Telegram, он и так идёт через FI (мини-приложения)", host)
 	}
 	if config.NotViaWorker(host) {
-		return fmt.Errorf("%s через воркер не пускаем: YouTube и Google увидят страну воркера, и YouTube Music станет «недоступен в вашем регионе». Для видео включите «Свежие ролики YouTube через воркер» ниже", host)
+		return fmt.Errorf("%s через воркер не пускаем: YouTube и Google увидят страну воркера, и YouTube Music станет «недоступен в вашем регионе». Для видео есть переключатель «Ролики, закрытые провайдером» выше", host)
+	}
+	if d.behindCloudflare(host) {
+		return fmt.Errorf("%s стоит за Cloudflare, а воркер Cloudflare к таким сайтам подключиться не может — открыть его через другую страну так не получится. Здесь поможет только VPN", host)
 	}
 	d.mu.Lock()
 	restart := !d.webProxyNeededLocked() && d.cfg.Telegram.Enabled
@@ -59,6 +62,7 @@ func (d *Daemon) AddViaWorker(input string) error {
 		}
 	}
 	err = d.saveLocked()
+	runCtx := d.runCtx
 	d.mu.Unlock()
 	if err != nil {
 		return err
@@ -70,7 +74,41 @@ func (d *Daemon) AddViaWorker(input string) error {
 	} else {
 		d.recheckWorker()
 	}
+	go d.markCloudflareSites(runCtx) // домены сайта: какие из них воркер не откроет
 	return nil
+}
+
+// behindCloudflare — сайт сам стоит за Cloudflare: воркер к нему подключиться не сможет.
+func (d *Daemon) behindCloudflare(host string) bool {
+	d.mu.Lock()
+	srv := d.tg
+	d.mu.Unlock()
+	if srv == nil {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+	defer cancel()
+	return srv.BehindCloudflare(ctx, host)
+}
+
+// markCloudflareSites узнаёт, какие сайты из списка «через воркер» стоят за Cloudflare: окно
+// помечает их, а прокси ведёт напрямую. Нужен для сайтов, добавленных прежними версиями FI, и
+// для доменов, которые добавились вместе с сайтом.
+func (d *Daemon) markCloudflareSites(ctx context.Context) {
+	d.mu.Lock()
+	srv, hosts := d.tg, slices.Clone(d.cfg.ViaWorker)
+	d.mu.Unlock()
+	if srv == nil {
+		return
+	}
+	for _, h := range hosts {
+		lctx, cancel := context.WithTimeout(ctx, 6*time.Second)
+		srv.BehindCloudflare(lctx, h)
+		cancel()
+		if ctx.Err() != nil {
+			return
+		}
+	}
 }
 
 // RemoveViaWorker убирает сайт и его домены из списка через воркер.
@@ -126,7 +164,7 @@ func (d *Daemon) SetYouTubeViaWorker(on bool) error {
 	d.mu.Lock()
 	if on && (!d.cfg.Telegram.Enabled || d.cfg.Telegram.Worker == "") {
 		d.mu.Unlock()
-		return errors.New("нужен свой Cloudflare Worker и включённый прокси для Telegram — задайте воркер в разделе Telegram")
+		return errors.New("нужен свой воркер Cloudflare и включённый прокси для Telegram — настройте воркер в разделе Cloudflare")
 	}
 	restart := on && !d.webProxyNeededLocked()
 	d.cfg.YouTubeViaWorker = on

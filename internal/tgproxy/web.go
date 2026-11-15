@@ -179,10 +179,17 @@ func (p *WebProxy) connect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var upstream net.Conn
-	if geo {
+	switch {
+	case geo && p.cantUseWorker(r.Context(), host):
+		// Сайт стоит за Cloudflare, и воркер к нему не подключится: напрямую он хотя бы откроется
+		// так же, как без FI. Окно об этом говорит (Status.ViaWorkerBlocked).
+		dctx, cancel := context.WithTimeout(r.Context(), dialTimeout)
+		upstream, err = p.direct(dctx, r.Host)
+		cancel()
+	case geo:
 		// Сайт закрыт для России самим сервисом: напрямую он ответит «недоступно в вашей стране».
 		upstream, err = p.workerOnly(r.Context(), host, port)
-	} else {
+	default:
 		upstream, err = p.dial(r.Context(), host, port)
 	}
 	if err != nil {
@@ -468,7 +475,43 @@ func firstAnswer(conn net.Conn, data []byte, wait time.Duration) ([]byte, error)
 
 // WorkerTLS проверяет, что сайт открывается через воркер: рукопожатие TLS до него.
 func (s *Server) WorkerTLS(ctx context.Context, host string) error {
-	conn, err := s.dialWorkerTCP(ctx, host, 443)
+	return s.workerTLS(ctx, host, s.plainPump.Load())
+}
+
+// VerifyPump проверяет пересылку данных сайта через воркер настоящим рукопожатием TLS. Восьмая
+// версия воркера читает записи TLS целиком — это быстрее, но держится на возможности Cloudflare,
+// которой в старом коде не было. Если так соединение не проходит, а по-простому проходит, FI
+// дальше просит воркер пересылать по-простому: сайты работают, как с прежним кодом, вместо того
+// чтобы не работать вовсе. Ошибка — не прошло никак: дело не в способе пересылки.
+func (s *Server) VerifyPump(ctx context.Context, host string) error {
+	return s.verifyPump(func(plain bool) error {
+		tctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		defer cancel()
+		return s.workerTLS(tctx, host, plain)
+	})
+}
+
+func (s *Server) verifyPump(try func(plain bool) error) error {
+	fast := try(false)
+	if fast == nil {
+		s.plainPump.Store(false)
+		return nil
+	}
+	if err := try(true); err != nil {
+		return errors.Join(fast, err)
+	}
+	s.plainPump.Store(true)
+	if s.Log != nil {
+		s.Log.Warn("быстрая пересылка в воркере не сработала — FI просит воркер пересылать данные по-простому, как прежний код", "worker", s.Worker, "err", fast)
+	}
+	return nil
+}
+
+// PlainPump — воркер пересылает данные сайтов по-простому: быстрая пересылка не прошла проверку.
+func (s *Server) PlainPump() bool { return s.plainPump.Load() }
+
+func (s *Server) workerTLS(ctx context.Context, host string, plain bool) error {
+	conn, err := s.dialWorkerTCPWith(ctx, host, 443, plain)
 	if err != nil {
 		return err
 	}
@@ -509,6 +552,14 @@ func (p *WebProxy) dial(ctx context.Context, host string, port int) (net.Conn, e
 		return nil, err
 	}
 	return r.conn, nil
+}
+
+// cantUseWorker — воркер до сайта не дотянется (сайт стоит за Cloudflare).
+func (p *WebProxy) cantUseWorker(ctx context.Context, host string) bool {
+	if p.Server == nil || p.dialWorker != nil { // в тестах воркер подменён и открывает всё
+		return false
+	}
+	return p.Server.BehindCloudflare(ctx, host)
 }
 
 func (p *WebProxy) workerOnly(ctx context.Context, host string, port int) (net.Conn, error) {
@@ -601,20 +652,39 @@ func relay(client net.Conn, clientBuf *bufio.Reader, upstream net.Conn) {
 	<-done
 }
 
-// dialWorkerTCP открывает через Cloudflare Worker сырое TCP-соединение с сайтом Telegram.
+// dialWorkerTCP открывает через Cloudflare Worker сырое TCP-соединение с сайтом.
 func (s *Server) dialWorkerTCP(ctx context.Context, host string, port int) (net.Conn, error) {
+	return s.dialWorkerTCPWith(ctx, host, port, s.plainPump.Load())
+}
+
+// dialWorkerTCPWith — то же, но способ пересылки задан явно: plain — по мере прихода.
+func (s *Server) dialWorkerTCPWith(ctx context.Context, host string, port int, plain bool) (net.Conn, error) {
+	if s.workerLimited() {
+		return nil, s.limitError()
+	}
+	if s.workerCantReach(host) {
+		return nil, fmt.Errorf("%s: %w", host, ErrBehindCloudflare)
+	}
 	path := fmt.Sprintf("/?host=%s&port=%d", url.QueryEscape(host), port)
 	if s.WorkerKey != "" {
 		path += "&key=" + url.QueryEscape(s.WorkerKey)
+	}
+	if plain {
+		path += "&p=0"
 	}
 	var errs []error
 	for _, ip := range s.cfAddrs(ctx, s.Worker, s.edges(s.Worker)) {
 		dialCtx, cancel := context.WithTimeout(ctx, dialTimeout)
 		ws, err := dialWS(dialCtx, net.JoinHostPort(ip, workerPort), s.Worker, path)
 		cancel()
+		if s.noteWorkerDial(err) {
+			return nil, s.limitError() // лимит один на все адреса: другой адрес ответит тем же
+		}
 		if err == nil {
-			ws.raw = true
-			return newWSStream(ws), nil
+			ws.raw, ws.onCut = true, s.noteCut
+			stream := newWSStream(ws)
+			stream.onRefused = func() { s.refused(host) }
+			return stream, nil
 		}
 		// Ответ самого воркера — приговор: через другой адрес Cloudflare он ответит то же.
 		// Отказ самого Cloudflare (ошибка 1034 на адресе, который не обслуживает воркер) — нет:
@@ -627,13 +697,15 @@ func (s *Server) dialWorkerTCP(ctx context.Context, host string, port int) (net.
 			case http.StatusBadGateway:
 				return nil, fmt.Errorf("воркер %s не смог подключиться к %s", s.Worker, host)
 			case http.StatusForbidden:
-				return nil, fmt.Errorf("воркер %s не пускает к %s: вставьте в него код из FI («Скопировать код воркера»)", s.Worker, host)
+				// Воркер до версии 8 пускал только к порту 443 и только по имени сайта: программам,
+				// запущенным через Cloudflare, этого мало.
+				if strings.Contains(se.body, "порт 443") || strings.Contains(se.body, "имя сайта") {
+					return nil, fmt.Errorf("воркер %s пускает только к сайтам на порту 443 — обновите его код, чтобы он открыл %s:%d", s.Worker, host, port)
+				}
+				return nil, fmt.Errorf("воркер %s не пускает к %s: обновите его код в разделе Cloudflare", s.Worker, host)
 			}
 		}
 		s.dropEdge(ip, err)
-		if se != nil && (se.code == http.StatusTooManyRequests || se.cfCode() == 1027) {
-			return nil, fmt.Errorf("воркер %s исчерпал дневной лимит запросов бесплатного тарифа Cloudflare — лимит обнулится в 03:00 по Москве", s.Worker)
-		}
 		errs = append(errs, fmt.Errorf("воркер %s через %s: %w", s.Worker, ip, err))
 	}
 	if len(errs) == 0 {
@@ -652,6 +724,11 @@ const WorkerVersionWeb = 5
 // килобайт, то через сотню мегабайт (замер 2026-11-11, одинаково через провайдера и через VPN).
 // Видео и файлы через воркер поэтому шли рывками.
 const WorkerVersionFast = 7
+
+// WorkerVersionCurrent — версия кода воркера, вшитого в эту сборку FI. Восьмая читает запись
+// TLS целиком одним вызовом (вчетверо меньше процессорного времени на мегабайт, чем кусками по
+// 4 КБ) и с ключом FI открывает любой порт — это нужно программам, запущенным через Cloudflare.
+const WorkerVersionCurrent = 8
 
 var workerVersionRe = regexp.MustCompile(`версия (\d+)`)
 
@@ -705,6 +782,8 @@ type wsStream struct {
 	// браузеру). dead — сторож закрыл соединение, потому что оно замерло.
 	waiting atomic.Int64
 	dead    atomic.Bool
+	// onRefused — Cloudflare не дал воркеру подключиться к сайту: прокси это запоминает.
+	onRefused func()
 }
 
 // wsPingEvery — сколько соединение с воркером может молчать, прежде чем сторож пошлёт ping,
@@ -770,6 +849,12 @@ func (s *wsStream) Read(p []byte) (int, error) {
 			case err == io.EOF && s.ws.closeCode != 0 && s.ws.closeCode != 1000 && s.ws.closeReason != "":
 				// Воркер оборвал соединение сам и назвал причину («tcp: …» — не смог подключиться
 				// к сайту): без неё в журнале был бы голый EOF.
+				if refusedByPlatform(s.ws.closeReason) {
+					if s.onRefused != nil {
+						s.onRefused()
+					}
+					return 0, fmt.Errorf("%w (%s)", ErrBehindCloudflare, s.ws.closeReason)
+				}
 				return 0, fmt.Errorf("воркер закрыл соединение: %s", s.ws.closeReason)
 			}
 			return 0, err

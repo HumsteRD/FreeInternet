@@ -160,6 +160,35 @@ func (d *Daemon) Handle(ctx context.Context, method string, params json.RawMessa
 		}
 	case "worker_code":
 		return map[string]string{"code": d.WorkerCode()}, nil
+	case "setup_worker":
+		var p struct {
+			Token    string `json:"token"`
+			Region   string `json:"region"`
+			Remember bool   `json:"remember"`
+		}
+		if err = decode(params, &p); err == nil {
+			err = d.StartWorkerSetup(p.Token, p.Region, p.Remember)
+		}
+	case "update_worker":
+		err = d.UpdateWorker()
+	case "clear_worker_setup":
+		d.ClearWorkerSetup()
+	case "forget_cf_token":
+		err = d.ForgetCloudflareToken()
+	case "add_app":
+		var p struct {
+			Path string `json:"path"`
+		}
+		if err = decode(params, &p); err == nil {
+			err = d.AddApp(p.Path)
+		}
+	case "remove_app":
+		var p struct {
+			Path string `json:"path"`
+		}
+		if err = decode(params, &p); err == nil {
+			err = d.RemoveApp(p.Path)
+		}
 	case "recheck_worker":
 		d.recheckWorker()
 	case "set_telegram_mini_apps":

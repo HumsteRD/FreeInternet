@@ -36,7 +36,7 @@ func TestLiveVideoFallback(t *testing.T) {
 
 	// 1. Замер входов вместе с отказывающими адресами: в быстрые они попасть не должны.
 	start := time.Now()
-	edges := pickEdges(context.Background(), worker, append(append([]string{}, edgeCandidates...), refusingEdges...))
+	edges, _ := pickEdges(context.Background(), worker, append(append([]string{}, edgeCandidates...), refusingEdges...))
 	t.Logf("замер за %v: %+v", time.Since(start).Round(time.Millisecond), edges)
 	if len(edges) == 0 {
 		t.Fatal("ни один вход не прошёл проверку воркером")

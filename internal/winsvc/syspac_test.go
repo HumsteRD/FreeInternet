@@ -1,6 +1,10 @@
 package winsvc
 
-import "testing"
+import (
+	"slices"
+	"testing"
+	"time"
+)
 
 func TestParseProxyServer(t *testing.T) {
 	for in, want := range map[string]string{
@@ -40,10 +44,57 @@ func TestNextPAC(t *testing.T) {
 			t.Errorf("%s: %q %v, ждали %q %v", c.name, want, action, c.want, c.action)
 		}
 	}
-	if UserRemovedPAC("", "127.0.0.1:10809") {
-		t.Error("PAC сменил прокси VPN-клиента — человек ничего не убирал, функцию выключать нельзя")
+}
+
+// TestPACWatch: VPN-клиент стёр сценарий — функция не выключается, сценарий возвращается сам.
+func TestPACWatch(t *testing.T) {
+	const base = "http://127.0.0.1:1454/sites.pac"
+	now := time.Date(2026, 11, 12, 22, 1, 20, 0, time.UTC)
+	tick := func() time.Time { now = now.Add(3 * time.Second); return now }
+
+	// Happ включили: он стёр сценарий, через пару опросов служба увидела VPN и сценарий больше не просит.
+	var w PACWatch
+	for i := 1; i < PACGoneChecks; i++ {
+		if d := w.Decide(tick(), base, "", "", true); d != PACWait {
+			t.Fatalf("опрос %d после пропажи: %v, ждали ожидание VPN", i, d)
+		}
 	}
-	if !UserRemovedPAC("", "") {
-		t.Error("PAC пропал, и прокси нет — его убрал человек")
+	if d := w.Decide(tick(), "", "", "", true); d != PACSync {
+		t.Fatalf("служба увидела VPN: %v", d)
+	}
+	// VPN выключили: сценарий просто ставится снова — прошлая пропажа забыта.
+	if d := w.Decide(tick(), base, "", "", false); d != PACSync {
+		t.Fatalf("после VPN: %v", d)
+	}
+
+	// VPN не объявился — сценарий возвращается, а не выключается функция.
+	w = PACWatch{}
+	var d PACDecision
+	for range PACGoneChecks {
+		d = w.Decide(tick(), base, "", "", true)
+	}
+	if d != PACRestore {
+		t.Fatalf("сценарий пропал без VPN: %v, ждали возврат", d)
+	}
+
+	// Прокси VPN-клиента или чужой сценарий на месте нашего — не пропажа.
+	if d := w.Decide(tick(), base, "", "127.0.0.1:10809", true); d != PACSync {
+		t.Fatalf("прокси VPN: %v", d)
+	}
+	if d := w.Decide(tick(), base, "http://corp/proxy.pac", "", true); d != PACSync {
+		t.Fatalf("чужой сценарий: %v", d)
+	}
+
+	// Сценарий убирают раз за разом — FI перестаёт спорить.
+	w = PACWatch{}
+	var got []PACDecision
+	for range (pacFightLimit + 1) * PACGoneChecks {
+		if d := w.Decide(tick(), base, "", "", true); d != PACWait {
+			got = append(got, d)
+		}
+	}
+	want := []PACDecision{PACRestore, PACRestore, PACRestore, PACGiveUp}
+	if !slices.Equal(got, want) {
+		t.Fatalf("решения %v, ждали %v", got, want)
 	}
 }

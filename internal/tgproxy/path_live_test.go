@@ -118,7 +118,7 @@ func TestLiveEdges(t *testing.T) {
 	defer func() { wsLocalAddr = nil }()
 	worker := liveWorker(t)
 	start := time.Now()
-	edges := pickEdges(context.Background(), worker, edgeCandidates)
+	edges, _ := pickEdges(context.Background(), worker, edgeCandidates)
 	t.Logf("замер за %v: %+v", time.Since(start).Round(time.Millisecond), edges)
 
 	measure := func(name string, s *Server) {

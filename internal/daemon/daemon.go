@@ -70,6 +70,9 @@ type Status struct {
 	StrategyList []string `json:"strategy_list"` // что можно выбрать вручную
 	Custom       []string `json:"custom_strategies"`
 	ViaWorker    []string `json:"via_worker"` // сайты через воркер
+	// ViaWorkerBlocked — те из них, что сами стоят за Cloudflare: воркер к таким не подключается,
+	// и они идут напрямую.
+	ViaWorkerBlocked []string `json:"via_worker_blocked,omitempty"`
 	// ViaWorkerBrowsers — FI ставит в Windows сценарий прокси, чтобы сайты через воркер шли и в браузерах.
 	ViaWorkerBrowsers bool `json:"via_worker_browsers"`
 	YouTubeViaWorker  bool `json:"youtube_via_worker"` // свежие ролики YouTube через воркер
@@ -96,8 +99,12 @@ type Status struct {
 	CheckedAt      time.Time       `json:"checked_at,omitzero"`
 	Sites          []config.Site   `json:"sites"`
 	Telegram       TelegramStatus  `json:"telegram"`
-	Base           BaseStatus      `json:"base"`
-	App            AppStatus       `json:"app"`
+	// Cloudflare — свой воркер: настройка по токену и расход бесплатного тарифа.
+	Cloudflare CloudflareStatus `json:"cloudflare"`
+	// Programs — программы, которые запускаются из FI через Cloudflare.
+	Programs ProgramsStatus `json:"programs"`
+	Base     BaseStatus     `json:"base"`
+	App      AppStatus      `json:"app"`
 }
 
 type Daemon struct {
@@ -127,17 +134,31 @@ type Daemon struct {
 	checkedAt      time.Time
 	lastSelect     time.Time
 
-	tg        *tgproxy.Server
-	tgStop    context.CancelFunc
-	tgDone    chan struct{}
-	tgErr     string
-	tgCF      []string  // общие домены Cloudflare (tg-ws-proxy)
-	tgCFAt    time.Time // когда их обновляли
-	web       *tgproxy.WebProxy
-	webDone   chan struct{}
-	webErr    string
-	antiCheat string    // запущенный античит: пока он есть, обход не перезапускается
-	game      gameWatch // проверки интернета, пока идёт игра с античитом
+	tg       *tgproxy.Server
+	tgStop   context.CancelFunc
+	tgDone   chan struct{}
+	tgErr    string
+	tgCF     []string  // общие домены Cloudflare (tg-ws-proxy)
+	tgCFAt   time.Time // когда их обновляли
+	web      *tgproxy.WebProxy
+	webDone  chan struct{}
+	webErr   string
+	tgCtx    context.Context   // пока работает прокси Telegram: в нём живут и его спутники
+	apps     *tgproxy.AppProxy // прокси программ, запущенных через Cloudflare; nil — программ нет
+	appsStop context.CancelFunc
+	appsDone chan struct{}
+	appsErr  string
+	// Cloudflare (cloudflare.go): расход воркера между перезапусками прокси, ход настройки по
+	// токену, есть ли сохранённый токен и принял ли его Cloudflare, когда пробовали обновить воркер.
+	usage         tgproxy.WorkerUsage
+	usageSaved    string // что уже лежит в worker-usage.json: без изменений файл не переписывается
+	cfSetup       *WorkerSetup
+	cfHasToken    bool
+	cfTokenErr    string
+	cfUpdateTried time.Time
+	pumpChecked   string    // для какого прокси, воркера и версии пересылка уже проверена
+	antiCheat     string    // запущенный античит: пока он есть, обход не перезапускается
+	game          gameWatch // проверки интернета, пока идёт игра с античитом
 	// minorPending — второстепенный сбой отложил подбор до следующей плановой проверки.
 	minorPending bool
 	lastResults  []probe.Result
@@ -195,6 +216,8 @@ func New(dataDir string, log *slog.Logger) (*Daemon, error) {
 	d.ensureWorkerKey()
 	d.ensureFamilies()
 	d.loadCFCache()
+	d.loadUsage()
+	d.cfHasToken = d.loadToken() != ""
 	return d, nil
 }
 
@@ -235,6 +258,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 		case <-ctx.Done():
 			d.CancelTask()
 			d.tasks.Wait()
+			d.saveUsage()
 			d.stopTelegram()
 			d.stopEngine()
 			return nil
@@ -243,6 +267,8 @@ func (d *Daemon) Run(ctx context.Context) error {
 			d.maybeAutoUpdate(ctx)
 			d.maybeAppUpdate(ctx)
 			d.refreshCF(ctx, false)
+			d.markCloudflareSites(ctx)
+			d.saveUsage()
 			d.mu.Lock()
 			every := max(time.Duration(d.cfg.CheckEvery), time.Minute)
 			d.mu.Unlock()
@@ -293,7 +319,12 @@ func (d *Daemon) Status() Status {
 		task := *d.task
 		st.Task = &task
 	}
-	st.Telegram = d.telegramStatusLocked()
+	st.Telegram = d.telegramStatusLocked(vpn)
+	if d.tg != nil {
+		st.ViaWorkerBlocked = d.tg.KnownBehindCloudflare(d.cfg.ViaWorker)
+	}
+	st.Cloudflare = d.cloudflareStatusLocked()
+	st.Programs = d.programsStatusLocked()
 	st.Base = d.baseStatusLocked()
 	st.App = d.appStatusLocked()
 	switch {

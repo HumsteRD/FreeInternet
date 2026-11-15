@@ -16,6 +16,7 @@ const ICONS = {
   monitor: '<rect x="3" y="4.5" width="18" height="12" rx="2"/><path d="M8.5 20h7"/><path d="M12 16.5V20"/>',
   clipboard: '<rect x="5.5" y="5" width="13" height="16" rx="2"/><rect x="9" y="3" width="6" height="4" rx="1.2"/>',
   trash: '<path d="M4.5 7h15"/><path d="M9.5 7V4.5h5V7"/><path d="M6.5 7l.9 12.5h9.2L17.5 7"/>',
+  launch: '<path d="M13.5 4.5h6v6"/><path d="M19.5 4.5L11 13"/><path d="M17.5 14v4a1.5 1.5 0 0 1-1.5 1.5H6A1.5 1.5 0 0 1 4.5 18V8A1.5 1.5 0 0 1 6 6.5h4"/>',
   chevronLeft: '<path d="M14.5 6l-6 6 6 6"/>',
   spinner: '<path d="M12 3.5a8.5 8.5 0 1 0 8.5 8.5"/>',
 };
@@ -79,8 +80,15 @@ const postJSON = async (path, body) => {
 
 // ─── Состояние ────────────────────────────────────────────────────────────
 
+// idlePrograms — программы через Cloudflare, пока ничего не запускают. confirm — путь программы,
+// про которую спрашиваем «закрыть и запустить»; path — к какой программе относятся notice и error.
+function idlePrograms() {
+  return { busy: false, confirm: '', notice: '', error: '', path: '' };
+}
+
 const state = {
-  screen: 'main', // main, site, diagnose, settings
+  screen: 'main', // main, site, diagnose, settings, look, cloudflare
+  from: 'main', // с какого экрана открыт вложенный (оформление, Cloudflare): туда ведёт «Назад»
   status: null,
   unavailable: false,
   message: '',
@@ -89,9 +97,15 @@ const state = {
   autostart: null, // запуск окна вместе с Windows; null — ещё не узнали
   copied: false, // ссылка прокси Telegram только что скопирована
   worker: null, // домен Cloudflare Worker, пока его правят в поле; null — показываем сохранённый
+  viaWorker: null, // сайт в поле «Сайты через воркер», пока его вводят
+  viaWorkerError: '', // почему сайт не добавлен: показывается под полем
   tgClients: null, // клиенты Telegram на компьютере (Telegram, AyuGram…); null — ещё не искали
   notice: '', // что получилось: «Отчёт сохранён…»; сбрасывается при переходе между экранами
   look: null, // оформление: тема, акцент, шрифт, углы, масштаб, анимации (readLook ниже)
+  // Мастер Cloudflare: wizard — открыт поверх настроенного воркера; token живёт только в памяти
+  // окна, пока воркер не создан; manual и formHelp — раскрытые подсказки.
+  cf: { wizard: false, token: '', region: 'de', remember: true, error: '', hint: '', manual: false, formHelp: false },
+  programs: idlePrograms(),
 };
 
 // ─── Оформление ──────────────────────────────────────────────────────────
@@ -283,6 +297,7 @@ const VERDICT_BADGE = {
   not_fixed: ['fail', 'Не помогло'],
   dns: ['warn', 'Нужен DNS'],
   tunnel: ['warn', 'Нужен туннель'],
+  vpn: ['warn', 'Нужен VPN'],
   via_worker: ['proxy', 'Через воркер'],
   not_found: ['fail', 'Не найден'],
   unreachable: ['fail', 'Не добавлен'],
@@ -359,6 +374,8 @@ function view() {
       return settingsView(st);
     case 'look':
       return lookView();
+    case 'cloudflare':
+      return cloudflareView(st);
     default:
       return mainView(st);
   }
@@ -486,17 +503,39 @@ function mainView(st) {
   const tgw = st.telegram ?? {};
   const fresh =
     st.youtube_blocked && !st.youtube_via_worker && !st.vpn
-      ? `<section class="panel notice warn">${icon('play', 16)}<span>Провайдер закрыл серверы Google, с которых YouTube отдаёт свежие и редкие ролики, — обход их не откроет, поэтому часть видео не грузится. ${
+      ? `<section class="panel notice warn">${icon('play', 16)}<span>Часть видео YouTube не грузится: провайдер закрыл серверы Google со свежими и редкими роликами, и обход их не откроет. ${
           tgw.enabled && tgw.worker
-            ? 'FI может вести такие серверы через ваш Cloudflare Worker. <button class="btn sm" data-action="youtube-via-worker-on">Включить</button>'
-            : 'Помогает свой Cloudflare Worker: задайте его в разделе Telegram. <button class="btn sm" data-action="open" data-screen="settings">Настройки</button>'
+            ? 'FI поведёт их через ваш воркер Cloudflare — в Windows появится сценарий прокси только для них. <button class="btn sm" data-action="youtube-via-worker-on">Включить</button>'
+            : 'Поможет бесплатный сервер в Cloudflare — настройка в три шага. <button class="btn sm" data-action="open" data-screen="cloudflare">Настроить</button>'
         }</span></section>`
       : '';
-  // Старый код воркера пересылает данные мелкими кусками, и Cloudflare обрывает быстрые загрузки.
-  const slowWorker =
-    tgw.enabled && tgw.worker && tgw.worker_slow
-      ? `<section class="panel notice warn">${icon('refresh', 16)}<span>Код вашего Cloudflare Worker устарел: Cloudflare обрывает через него быстрые загрузки, поэтому видео и файлы идут рывками. Обновление занимает минуту: «Скопировать код воркера» в настройках → вставить в Cloudflare → Deploy. <button class="btn sm" data-action="open" data-screen="settings">Настройки</button></span></section>`
-      : '';
+  // Cloudflare: исчерпанный лимит и обрывы не должны проходить молча — человек иначе гадает,
+  // почему всё встало. Новый код воркера с сохранённым токеном FI ставит сам; без токена — зовём.
+  const cf = st.cloudflare ?? {};
+  const cfUsed = tgw.enabled && tgw.worker;
+  let cloud = '';
+  if (cfUsed && cf.limited_until) {
+    cloud = `<section class="panel notice warn">${icon('clock', 16)}<span>Суточный лимит Cloudflare исчерпан: воркер снова заработает в ${esc(clockText(cf.limited_until))}. Telegram идёт запасным путём; сайты через воркер и закрытые ролики YouTube до тех пор не откроются. <button class="btn sm" data-action="open" data-screen="cloudflare">Подробнее</button></span></section>`;
+  } else if (cfUsed && (cf.cuts ?? 0) >= 5) {
+    cloud = `<section class="panel notice warn">${icon('pulse', 16)}<span>Cloudflare обрывает загрузки через воркер: бесплатному тарифу не хватает процессорного времени на долгое видео и большие файлы. Переписка и сайты идут как прежде. <button class="btn sm" data-action="open" data-screen="cloudflare">Подробнее</button></span></section>`;
+  } else if (cfUsed && (tgw.worker_outdated || (tgw.worker_update && (!cf.has_token || cf.token_error)))) {
+    cloud = `<section class="panel notice warn">${icon('refresh', 16)}<span>Вышел новый код воркера Cloudflare: с ним загрузки обрываются реже. Обновление — пара минут. <button class="btn sm" data-action="open" data-screen="cloudflare">Обновить</button></span></section>`;
+  }
+  // Программы через Cloudflare — запуск одним нажатием прямо с главного экрана.
+  const apps = st.programs?.apps ?? [];
+  const run = state.programs;
+  const asking = apps.find((a) => a.path === run.confirm);
+  const quick = apps.length
+    ? `<section class="panel quick">
+        <div class="quick-row">
+          <span class="quick-label">Через Cloudflare</span>
+          ${apps.map((a) => `<button class="chip run" data-action="program-run" data-path="${esc(a.path)}" title="Запустить через Cloudflare" ${run.busy ? 'disabled' : ''}>${icon('launch', 13, 2)}<span>${esc(a.name)}</span></button>`).join('')}
+        </div>
+        ${asking ? programAsk(asking) : ''}
+        ${run.notice ? `<p class="notice-line">${icon('check', 14, 2)}<span>${esc(run.notice)}</span></p>` : ''}
+        ${run.error ? `<p class="field-error">${esc(run.error)}</p>` : ''}
+      </section>`
+    : '';
   const game = st.anti_cheat
     ? `<section class="panel notice">${icon('play', 16)}<span>Идёт игра с античитом ${esc(st.anti_cheat)}. ${
         st.running
@@ -507,11 +546,12 @@ function mainView(st) {
   return `${heroView(st)}
     ${dns}
     ${fresh}
-    ${slowWorker}
+    ${cloud}
     ${game}
     ${errorLine()}
     ${vpn}
     ${selectNote(st)}
+    ${quick}
     <section class="stack">
       <div class="section-label"><span>Сервисы</span></div>
       <div class="panel">${services.map((s) => serviceRow(s, st)).join('')}</div>
@@ -597,7 +637,7 @@ function siteView(st) {
           ['tunnel', 'unreachable'].includes(s.result.verdict) && canWorker
             ? `<button class="btn sm primary" data-action="site-via-worker" ${s.busy ? 'disabled' : ''}>Открыть через другую страну</button>`
             : '';
-        const browsers = s.result.browsers ? '<button class="btn sm primary" data-action="site-browsers">Применять в браузерах</button>' : '';
+        const browsers = s.result.browsers ? '<button class="btn sm primary" data-action="site-browsers">Открывать в браузерах</button>' : '';
         return `<section class="panel result">
           <div class="result-head"><span class="mono strong">${esc(s.result.host)}</span>${badge(kind, label)}</div>
           <p class="result-text">${esc(s.result.message)}</p>
@@ -650,7 +690,10 @@ function siteView(st) {
         ? `<section class="stack">
       <div class="section-label"><span>Через другую страну</span><span>${st.via_worker.length}</span></div>
       <div class="chips">${st.via_worker
-        .map((h) => `<button class="chip" data-action="via-worker-remove" data-host="${esc(h)}" title="Убрать">${esc(h)} ×</button>`)
+        .map((h) => {
+          const behind = (st.via_worker_blocked ?? []).includes(h);
+          return `<button class="chip ${behind ? 'warn' : ''}" data-action="via-worker-remove" data-host="${esc(h)}" title="${behind ? 'Стоит за Cloudflare — через воркер не откроется. Убрать' : 'Убрать'}">${esc(h)} ×</button>`;
+        })
         .join('')}</div>
     </section>`
         : ''
@@ -997,37 +1040,26 @@ function settingsView(st) {
                   tg.mini_apps_error
                     ? esc(tg.mini_apps_error)
                     : tg.worker_outdated
-                    ? 'Код воркера устарел: обновите его новым docs/cf-worker.js (README, шаг 2), иначе мини-приложения через него не откроются.'
+                    ? 'Код воркера устарел — мини-приложения через него не откроются. Обновите его в разделе «Cloudflare» ниже.'
                     : `Сайты Telegram для мини-приложений и ботов — через FI. Если провайдер закрыл их адреса, нужен свой Cloudflare Worker${
-                        tg.worker ? '' : ' (ниже)'
+                        tg.worker ? '' : ' — раздел «Cloudflare» ниже'
                       }. После включения перезапустите Telegram.`
                 }</span></span>
                 <button class="toggle ${tg.mini_apps ? 'on' : ''}" role="switch" aria-checked="${Boolean(tg.mini_apps)}" aria-label="Мини-приложения Telegram" data-action="tg-mini-apps"></button>
-              </div>
-              <div class="settings-row column">
-                <span class="row-text"><span class="row-title-sm">Свой Cloudflare Worker</span><span class="row-sub wrap">Личный путь надёжнее общих доменов: его никто не делит с вами. Как создать — в README. Пусто — без воркера.</span></span>
-                <form class="input-row" data-form="worker">
-                  <label class="input"><input id="worker-input" name="host" autocomplete="off" spellcheck="false" placeholder="имя-1234.логин.workers.dev" value="${esc(state.worker ?? tg.worker ?? '')}"></label>
-                  <button class="btn sm" type="submit">Сохранить</button>
-                </form>
-              </div>
-              <div class="settings-row column">
-                <span class="row-text"><span class="row-title-sm">Развернуть воркер автоматически</span><span class="row-sub wrap">FI сам загрузит воркер в ваш аккаунт Cloudflare и закрепит его в выбранной стране — её IP увидят сайты через воркер. Нужен токен: dash.cloudflare.com → My Profile → API Tokens → Create Token → шаблон «Edit Cloudflare Workers». FI его не сохраняет.</span></span>
-                <form class="input-row" data-form="worker-deploy">
-                  <label class="input"><input id="cf-token-input" type="password" autocomplete="off" spellcheck="false" placeholder="токен Cloudflare" value="${esc(state.cfToken ?? '')}"></label>
-                  <select class="select" id="cf-region" style="flex: none; width: auto">
-                    ${[['de', 'Германия'], ['nl', 'Нидерланды'], ['us', 'США']]
-                      .map(([v, l]) => `<option value="${v}" ${(state.cfRegion ?? 'de') === v ? 'selected' : ''}>${l}</option>`)
-                      .join('')}
-                  </select>
-                </form>
-                <div class="button-row"><button class="btn sm primary" data-action="worker-deploy" ${state.deploying ? 'disabled' : ''}>${state.deploying ? 'Разворачиваю…' : 'Развернуть'}</button></div>
               </div>`
             : ''
         }
       </div>
     </section>
-    ${viaWorkerSection(st)}
+    <section class="stack">
+      <div class="section-label"><span>Cloudflare</span></div>
+      <div class="panel">
+        <div class="settings-row">
+          <span class="row-text"><span class="row-title-sm">Свой воркер</span><span class="row-sub wrap">${esc(cfSummary(st))}</span></span>
+          <button class="btn sm ${tg.worker ? '' : 'primary'}" data-action="open" data-screen="cloudflare">${tg.worker ? 'Открыть' : 'Настроить'}</button>
+        </div>
+      </div>
+    </section>
     <section class="stack">
       <div class="section-label"><span>Журнал и отчёт</span></div>
       <div class="panel">
@@ -1044,52 +1076,320 @@ function settingsView(st) {
     <p class="hint">Стратегий в наборе: ${st.strategies}</p>`;
 }
 
-// viaWorkerSection — сайты, которые закрыли для России сами сервисы: они идут через воркер.
-function viaWorkerSection(st) {
+// ─── Cloudflare ───────────────────────────────────────────────────────────
+// Свой воркер: мастер настройки из трёх шагов, расход бесплатного тарифа и всё, что идёт через
+// воркер, — ролики YouTube, закрытые провайдером, сайты, недоступные из России, и программы.
+
+const CF_REGIONS = [['de', 'Германия'], ['nl', 'Нидерланды'], ['us', 'США']];
+const CF_STEPS = {
+  token: 'Проверяем токен…',
+  upload: 'Загружаем воркер в Cloudflare…',
+  wait: 'Ждём, пока воркер начнёт отвечать, — до минуты…',
+  check: 'Подключаем воркер к FI…',
+};
+const regionName = (id) => CF_REGIONS.find(([v]) => v === id)?.[1] ?? '';
+const count = (n) => Number(n ?? 0).toLocaleString('ru-RU');
+// Токен Cloudflare — 40 и больше латинских букв, цифр, «_» и «-».
+const looksLikeToken = (s) => /^[A-Za-z0-9_-]{40,200}$/.test(s);
+
+// cfWizardOpen — показывать мастер, а не состояние воркера: воркера ещё нет, человек сам открыл
+// настройку заново или она идёт прямо сейчас.
+function cfWizardOpen(st) {
+  const setup = st.cloudflare?.setup;
+  return state.cf.wizard || !st.telegram?.worker || Boolean(setup?.busy && !setup.update);
+}
+
+function cloudflareView(st) {
+  const wizard = cfWizardOpen(st);
+  return `${subHeader('Cloudflare')}
+    ${errorLine()}
+    ${wizard ? cfWizard(st) : `${cfStatus(st)}${cfYouTube(st)}${cfSites(st)}${cfPrograms(st)}`}`;
+}
+
+// cfWizard — три шага: аккаунт, токен, «Создать воркер». Дальше служба всё делает сама.
+function cfWizard(st) {
+  const cf = st.cloudflare ?? {};
+  const tg = st.telegram ?? {};
+  const setup = cf.setup;
+  const busy = Boolean(setup?.busy);
+  const s = state.cf;
+  const error = s.error || (setup && !setup.busy ? setup.error : '') || '';
+  const off = busy ? 'disabled' : '';
+  return `<section class="stack onboarding compact">
+      <span class="eyebrow">${tg.worker ? 'Настроить заново' : 'Три шага · около двух минут'}</span>
+      <h1 class="display">Свой сервер в Cloudflare</h1>
+      <p class="lead">Бесплатный личный воркер. Через него FI ведёт Telegram, когда его адреса закрыты, сайты, недоступные из России, и ролики YouTube, которые закрыл провайдер. Банковская карта не нужна.</p>
+      ${s.hint ? `<p class="notice-line">${icon('check', 14, 2)}<span>${esc(s.hint)}</span></p>` : ''}
+    </section>
+    <ol class="steps">
+      <li class="step">
+        <span class="step-num">1</span>
+        <div class="step-body">
+          <span class="row-title-sm">Аккаунт Cloudflare</span>
+          <span class="row-sub wrap">Нужны только почта и пароль. Аккаунт уже есть — просто войдите. После регистрации подтвердите почту: Cloudflare пришлёт письмо со ссылкой.</span>
+          <div class="button-row"><button class="btn sm" data-action="cf-open" data-page="signup">Открыть Cloudflare</button></div>
+        </div>
+      </li>
+      <li class="step">
+        <span class="step-num">2</span>
+        <div class="step-body">
+          <span class="row-title-sm">Токен для FI</span>
+          <span class="row-sub wrap">Это разрешение создать воркер в вашем аккаунте. Откроется страница с уже заполненной формой — менять в ней ничего не нужно:</span>
+          <ol class="mini-steps">
+            <li>внизу страницы нажмите <b>Continue to summary</b></li>
+            <li>затем <b>Create Token</b></li>
+            <li>и <b>Copy</b> — токен показывают один раз</li>
+          </ol>
+          <div class="button-row"><button class="btn sm" data-action="cf-open" data-page="token">Создать токен</button></div>
+          <button class="link-btn" data-action="cf-flag" data-name="formHelp">${s.formHelp ? 'Скрыть подсказку' : 'Форма открылась пустой?'}</button>
+          ${
+            s.formHelp
+              ? '<span class="row-sub wrap">На странице API Tokens нажмите <b>Create Token</b>, найдите шаблон <b>Edit Cloudflare Workers</b> и нажмите <b>Use template</b> — дальше те же три кнопки. Если Cloudflare просит войти — войдите и нажмите «Создать токен» ещё раз.</span>'
+              : ''
+          }
+        </div>
+      </li>
+      <li class="step">
+        <span class="step-num">3</span>
+        <div class="step-body">
+          <span class="row-title-sm">Вставьте токен</span>
+          <form class="stack-sm" data-form="cf-setup">
+            <div class="input-row">
+              <label class="input"><input id="cf-token-input" type="password" autocomplete="off" spellcheck="false" placeholder="токен из Cloudflare" value="${esc(s.token)}" ${off}></label>
+              <button class="btn sm" type="button" data-action="cf-paste" ${off}>Вставить</button>
+            </div>
+            <label class="field"><span class="row-sub">Страна воркера — её увидят сайты</span>
+              <select class="select" id="cf-region" ${off}>${CF_REGIONS.map(([v, l]) => `<option value="${v}" ${s.region === v ? 'selected' : ''}>${l}${v === 'de' ? ' — советуем' : ''}</option>`).join('')}</select>
+            </label>
+            <label class="check"><input type="checkbox" id="cf-remember" ${s.remember ? 'checked' : ''} ${off}><span>Запомнить токен на этом компьютере: FI сам обновит воркер, когда выйдет новая версия. Токен лежит в папке, доступной только администратору.</span></label>
+            ${busy ? `<div class="busy-line">${spinner()}<span>${esc(CF_STEPS[setup.step] ?? 'Настраиваем…')}</span></div>` : ''}
+            ${error ? `<p class="field-error">${esc(error)}</p>` : ''}
+            <button class="btn primary full" type="submit" ${off}>${busy ? 'Создаём воркер…' : 'Создать воркер'}</button>
+          </form>
+        </div>
+      </li>
+    </ol>
+    ${
+      tg.worker
+        ? `<button class="btn ghost full" data-action="cf-wizard-close" ${off}>Отмена</button>`
+        : `<button class="link-btn" data-action="cf-flag" data-name="manual">${s.manual ? 'Скрыть ручную настройку' : 'У меня уже есть воркер FI'}</button>${s.manual ? `<div class="panel">${cfManualRows(st)}</div>` : ''}`
+    }`;
+}
+
+// cfManualRows — ручная настройка: адрес готового воркера и его код для вставки в Cloudflare.
+function cfManualRows(st) {
+  const tg = st.telegram ?? {};
+  const cf = st.cloudflare ?? {};
+  return `<div class="settings-row column">
+      <span class="row-text"><span class="row-title-sm">Адрес воркера</span><span class="row-sub wrap">Если воркер создан руками в панели Cloudflare. Пусто — без воркера.</span></span>
+      <form class="input-row" data-form="worker">
+        <label class="input"><input id="worker-input" name="host" autocomplete="off" spellcheck="false" placeholder="fi-tg.имя.workers.dev" value="${esc(state.worker ?? tg.worker ?? '')}"></label>
+        <button class="btn sm" type="submit">Сохранить</button>
+      </form>
+    </div>
+    <div class="settings-row column">
+      <span class="row-text"><span class="row-title-sm">Код воркера</span><span class="row-sub wrap">Для вставки руками: в Cloudflare откройте воркер → Edit code → сотрите всё, вставьте → Deploy, затем «Проверить» здесь.</span></span>
+      <div class="button-row">
+        <button class="btn sm" data-action="worker-copy">Скопировать код</button>
+        <button class="btn sm ghost" data-action="cf-open" data-page="dashboard">Открыть панель Cloudflare</button>
+      </div>
+    </div>
+    ${
+      cf.has_token
+        ? `<div class="settings-row">
+      <span class="row-text"><span class="row-title-sm">Сохранённый токен</span><span class="row-sub wrap">С ним FI сам обновляет воркер. Сотрёте — воркер продолжит работать, но обновлять его придётся руками.</span></span>
+      <button class="btn sm ghost" data-action="cf-forget">Стереть</button>
+    </div>`
+        : ''
+    }`;
+}
+
+// cfStatus — воркер настроен: работает ли, сколько осталось от суточного лимита, что с обновлением.
+function cfStatus(st) {
+  const tg = st.telegram ?? {};
+  const cf = st.cloudflare ?? {};
+  const s = state.cf;
+  const setup = cf.setup;
+  const updating = Boolean(setup?.busy && setup.update);
+  const limit = cf.limit || 100000;
+  const share = Math.min(1, (cf.requests ?? 0) / limit);
+  const limited = Boolean(cf.limited_until);
+
+  let [kind, label] = ['ok', 'Работает'];
+  if (limited) [kind, label] = ['fail', 'Лимит исчерпан'];
+  else if (!tg.enabled) [kind, label] = ['off', 'Выключен'];
+  else if (updating) [kind, label] = ['check', 'Обновляется'];
+  else if (tg.worker_outdated || tg.worker_key_ok === false) [kind, label] = ['warn', 'Нужно обновить'];
+  else if (tg.worker_update) [kind, label] = ['warn', 'Есть обновление'];
+
+  const facts = [regionName(cf.region), cf.version ? `код версии ${cf.version}` : '', tg.edge ? `вход ${tg.edge}` : ''].filter(Boolean).join(' · ');
+  const notes = [];
+  if (limited) {
+    notes.push(`<p class="note fail">Бесплатному воркеру Cloudflare даёт ${count(limit)} запросов в сутки, и на сегодня они кончились. Воркер снова заработает в <b>${esc(clockText(cf.limited_until))}</b>. Telegram уже идёт запасным путём; сайты через воркер и закрытые ролики YouTube до тех пор не откроются.</p>`);
+  } else if (cf.saving) {
+    notes.push('<p class="note warn">Израсходовано больше 80% суточного лимита. Telegram пока идёт запасным путём, чтобы запросов хватило сайтам и видео.</p>');
+  }
+  if ((cf.cuts ?? 0) >= 3) {
+    notes.push(`<p class="note warn">Cloudflare оборвал ${count(cf.cuts)} ${plural(cf.cuts, 'загрузку', 'загрузки', 'загрузок')} за последние десять минут. Бесплатному воркеру не хватает процессорного времени на долгое видео и большие файлы — это предел тарифа, а не поломка. Переписка и обычные сайты идут как прежде; оборванное видео плеер обычно догружает сам, а для долгого просмотра надёжнее VPN.</p>`);
+  }
+  if (!tg.enabled) {
+    notes.push('<p class="note warn">Воркер работает вместе с прокси для Telegram, а он выключен: Настройки → Telegram.</p>');
+  }
+  if (cf.token_error) {
+    notes.push(`<p class="note warn">${esc(cf.token_error)}: без него FI не сможет обновлять воркер сам.</p>`);
+  }
+  if (setup && !setup.busy && setup.update && setup.error) {
+    notes.push(`<p class="note fail">Обновить воркер не удалось: ${esc(setup.error)}</p>`);
+  }
+  if (tg.worker_outdated || tg.worker_key_ok === false) {
+    notes.push('<p class="note warn">В воркере старый код или нет ключа FI: сайты через воркер и мини-приложения через него не откроются. Обновите код.</p>');
+  } else if (tg.worker_update && !updating) {
+    notes.push(
+      cf.has_token && !cf.token_error
+        ? '<p class="note">Вышел новый код воркера: он тратит меньше процессорного времени Cloudflare, и загрузки обрываются реже. FI обновит его сам — или нажмите «Обновить код».</p>'
+        : '<p class="note warn">Вышел новый код воркера: он тратит меньше процессорного времени Cloudflare, и загрузки обрываются реже. Нажмите «Обновить код» — понадобится токен (шаги 2 и 3 мастера), и дальше FI будет обновлять воркер сам.</p>',
+    );
+  }
+
+  const needsUpdate = tg.worker_update || tg.worker_outdated || tg.worker_key_ok === false;
+  return `<section class="stack">
+      <div class="panel">
+        <div class="settings-row column">
+          <div class="status-head">
+            <span class="row-text"><span class="row-title-sm">Свой воркер</span><span class="row-sub mono" title="${esc(tg.worker)}">${esc(tg.worker)}</span></span>
+            ${badge(kind, label)}
+          </div>
+          ${facts ? `<span class="row-sub">${esc(facts)}</span>` : ''}
+          <div class="field">
+            <div class="meter ${limited ? 'fail' : cf.saving ? 'warn' : ''}"><span style="width: ${Math.round(share * 100)}%"></span></div>
+            <span class="row-sub wrap">Сегодня ${count(cf.requests)} из ${count(limit)} запросов${cf.reset_at ? ` · счётчик обнулится в ${esc(clockText(cf.reset_at))}` : ''}</span>
+          </div>
+          ${notes.join('')}
+          ${updating ? `<div class="busy-line">${spinner()}<span>${esc(CF_STEPS[setup.step] ?? 'Обновляем…')}</span></div>` : ''}
+          <div class="button-row">
+            ${needsUpdate ? `<button class="btn sm primary" data-action="cf-update" ${updating ? 'disabled' : ''}>Обновить код</button>` : ''}
+            <button class="btn sm" data-action="worker-recheck" ${updating ? 'disabled' : ''}>Проверить</button>
+            <button class="btn sm ghost" data-action="cf-wizard" ${updating ? 'disabled' : ''}>Настроить заново</button>
+          </div>
+          ${noticeLine()}
+          <button class="link-btn" data-action="cf-flag" data-name="manual">${s.manual ? 'Скрыть ручную настройку' : 'Ручная настройка'}</button>
+        </div>
+        ${s.manual ? cfManualRows(st) : ''}
+      </div>
+    </section>`;
+}
+
+// cfYouTube — ролики с серверов Google, которые провайдер закрыл по адресу.
+function cfYouTube(st) {
+  const tg = st.telegram ?? {};
+  const sub = st.vpn
+    ? 'Сейчас включён VPN — YouTube ведёт он. Когда VPN выключат, FI снова поведёт закрытые серверы через воркер.'
+    : st.youtube_blocked && !st.youtube_via_worker
+      ? 'Провайдер сейчас закрывает серверы Google со свежими и редкими роликами — обход их не откроет. Включите, и FI поведёт их через воркер; в Windows появится сценарий прокси только для них.'
+      : 'Свежие и редкие ролики YouTube отдаёт с серверов Google, которые провайдер может закрыть целиком. FI ведёт их через воркер (сценарий прокси в Windows — только для них), остальное видео идёт напрямую.';
+  return `<section class="stack">
+      <div class="section-label"><span>YouTube</span></div>
+      <div class="panel">
+        <div class="settings-row">
+          <span class="row-text"><span class="row-title-sm">Ролики, закрытые провайдером</span><span class="row-sub wrap">${esc(sub)}</span></span>
+          <button class="toggle ${st.youtube_via_worker ? 'on' : ''}" role="switch" aria-checked="${Boolean(st.youtube_via_worker)}" aria-label="Ролики YouTube, закрытые провайдером" data-action="youtube-via-worker" ${!tg.enabled || !tg.worker ? 'disabled' : ''}></button>
+        </div>
+      </div>
+    </section>`;
+}
+
+// cfSites — сайты, которые закрыли для России сами сервисы: они идут через воркер.
+function cfSites(st) {
   const tg = st.telegram ?? {};
   const sites = st.via_worker ?? [];
-  let hint = 'Например, SoundCloud («Not available in Russian Federation»): обход DPI тут не поможет, сервис смотрит на страну. Сайт пойдёт через ваш Cloudflare Worker с не российского IP — в Telegram сразу, в браузерах — если включить ниже.';
-  let warn = false;
-  if (!tg.enabled) {
-    hint = 'Нужен включённый прокси для Telegram: сайты через воркер работают вместе с ним.';
-  } else if (!tg.worker) {
-    hint = 'Нужен свой Cloudflare Worker — задайте его выше, в разделе Telegram. ' + hint;
-  } else if ((sites.length || st.youtube_via_worker) && (tg.worker_key_ok === false || tg.worker_outdated)) {
-    warn = true;
-    hint = 'В воркере старый код: нажмите «Скопировать код воркера», вставьте его в Cloudflare (Edit code → Deploy) и нажмите «Проверить воркер».';
-  } else if (tg.worker_slow) {
-    warn = true;
-    hint = 'Код воркера устарел: Cloudflare обрывает через него быстрые загрузки, и видео с файлами идут рывками. Нажмите «Скопировать код воркера», вставьте его в Cloudflare (воркер → Edit code → стереть всё, вставить → Deploy) и нажмите «Проверить воркер». Или разверните воркер заново кнопкой «Развернуть» выше.';
-  }
+  const ready = tg.enabled && tg.worker;
+  // Сайт, который сам стоит за Cloudflare, воркер открыть не может: он идёт напрямую.
+  const blocked = (st.via_worker_blocked ?? []).filter((h) => sites.includes(h));
   return `<section class="stack">
       <div class="section-label"><span>Сайты через воркер</span></div>
       <div class="panel">
         <div class="settings-row column">
-          <span class="row-text"><span class="row-title-sm">Сайты, закрытые для России самими сервисами</span><span class="row-sub wrap"${warn ? ' style="color: var(--amber-text)"' : ''}>${esc(hint)}</span></span>
+          <span class="row-text"><span class="row-title-sm">Сайты, закрытые для России самими сервисами</span><span class="row-sub wrap">Например, SoundCloud («Not available in Russian Federation»): обход тут не поможет, сервис смотрит на страну. Через воркер сайт видит не российский адрес.</span></span>
           ${
             sites.length
-              ? `<div class="chips">${sites
-                  .map((h) => `<button class="chip" data-action="via-worker-remove" data-host="${esc(h)}" title="Убрать">${esc(h)} ×</button>`)
-                  .join('')}</div>`
+              ? `<div class="chips">${sites.map((h) => `<button class="chip ${blocked.includes(h) ? 'warn' : ''}" data-action="via-worker-remove" data-host="${esc(h)}" title="${blocked.includes(h) ? 'Стоит за Cloudflare — через воркер не откроется. Убрать' : 'Убрать'}">${esc(h)} ×</button>`).join('')}</div>`
+              : ''
+          }
+          ${
+            blocked.length
+              ? `<p class="note warn">${blocked.length === 1 ? `Сайт <b>${esc(blocked[0])}</b> сам стоит` : `Сайты <b>${esc(blocked.join(', '))}</b> сами стоят`} за Cloudflare, а воркер Cloudflare к таким не подключается: ${blocked.length === 1 ? 'он идёт' : 'они идут'} напрямую, как без FI. Сменить для ${blocked.length === 1 ? 'него' : 'них'} страну поможет только VPN.</p>`
               : ''
           }
           <form class="input-row" data-form="via-worker">
-            <label class="input"><input id="via-worker-input" name="host" autocomplete="off" spellcheck="false" placeholder="soundcloud.com" value="${esc(state.viaWorker ?? '')}"></label>
-            <button class="btn sm" type="submit" ${!tg.enabled || !tg.worker ? 'disabled' : ''}>Добавить</button>
+            <label class="input ${state.viaWorkerError ? 'is-error' : ''}"><input id="via-worker-input" name="host" autocomplete="off" spellcheck="false" placeholder="soundcloud.com" value="${esc(state.viaWorker ?? '')}"></label>
+            <button class="btn sm" type="submit" ${ready ? '' : 'disabled'}>Добавить</button>
           </form>
-          <div class="button-row">
-            <button class="btn sm" data-action="worker-copy">Скопировать код воркера</button>
-            <button class="btn sm ghost" data-action="worker-recheck" ${!tg.worker ? 'disabled' : ''}>Проверить воркер</button>
+          ${state.viaWorkerError ? `<p class="field-error">${esc(state.viaWorkerError)}</p>` : ''}
+        </div>
+        <div class="settings-row">
+          <span class="row-text"><span class="row-title-sm">Открывать их в браузерах</span><span class="row-sub wrap">FI ставит в Windows сценарий настройки прокси: через FI идут только эти сайты и закрытые серверы YouTube, остальное — напрямую. Пока включён VPN, FI сценарий убирает, а после возвращает сам. Без этого сайты из списка идут через воркер только в Telegram.</span></span>
+          <button class="toggle ${st.via_worker_browsers ? 'on' : ''}" role="switch" aria-checked="${Boolean(st.via_worker_browsers)}" aria-label="Открывать сайты через воркер в браузерах" data-action="via-worker-browsers" ${!sites.length && !st.youtube_via_worker ? 'disabled' : ''}></button>
+        </div>
+      </div>
+    </section>`;
+}
+
+// programAsk — программа уже работает: о прокси она узнаёт только при запуске, поэтому спрашиваем,
+// закрыть ли её. Вопрос стоит там, где человек нажал «Запустить», — искать его не приходится.
+function programAsk(a) {
+  return `<p class="note warn">Программа «${esc(a.name)}» уже работает, а о прокси она узнаёт только при запуске. Закрыть её и запустить заново через Cloudflare? Несохранённое в ней пропадёт.</p>
+    <div class="button-row">
+      <button class="btn sm primary" data-action="program-restart" data-path="${esc(a.path)}">Закрыть и запустить</button>
+      <button class="btn sm ghost" data-action="program-cancel">Отмена</button>
+    </div>`;
+}
+
+// cfPrograms — программы, которые FI запускает так, что их интернет идёт через воркер.
+function cfPrograms(st) {
+  const p = st.programs ?? {};
+  const apps = p.apps ?? [];
+  const s = state.programs;
+  // Итог запуска стоит в строке той программы, которую запускали: список бывает длинным, и
+  // сообщение над ним осталось бы за кромкой окна.
+  const said = [
+    s.notice ? `<p class="notice-line">${icon('check', 14, 2)}<span>${esc(s.notice)}</span></p>` : '',
+    s.error ? `<p class="field-error">${esc(s.error)}</p>` : '',
+  ].join('');
+  const inRow = apps.some((a) => a.path === s.path);
+  const rows = apps
+    .map(
+      (a) => `<div class="settings-row column">
+          <div class="app-row">
+            <span class="row-text"><span class="row-title-sm">${esc(a.name)}</span><span class="row-sub" title="${esc(a.path)}">${esc(a.path)}</span></span>
+            <button class="btn sm primary" data-action="program-run" data-path="${esc(a.path)}" ${s.busy ? 'disabled' : ''}>Запустить</button>
+            <button class="icon-btn" data-action="program-remove" data-path="${esc(a.path)}" title="Убрать из списка" aria-label="Убрать ${esc(a.name)} из списка">${icon('trash', 16)}</button>
           </div>
+          ${s.confirm === a.path ? programAsk(a) : ''}
+          ${s.path === a.path ? said : ''}
+        </div>`,
+    )
+    .join('');
+  const notes = [];
+  if (p.error) notes.push(`<p class="note warn">${esc(p.error)}</p>`);
+  else if (apps.length && p.old_worker) notes.push('<p class="note warn">В воркере старый код: программам он открывает только порт 443. Обновите код воркера выше — тогда откроются и остальные порты.</p>');
+  if (!inRow) notes.push(said);
+  if (apps.length && p.proxy && (p.conns || p.failed)) {
+    const viaWorker = Math.max(0, (p.conns ?? 0) - (p.direct ?? 0));
+    notes.push(
+      `<p class="note">Через Cloudflare прошло ${count(viaWorker)} ${plural(viaWorker, 'соединение', 'соединения', 'соединений')} программ${
+        p.direct ? `, напрямую — ${count(p.direct)} (сайты за Cloudflare)` : ''
+      }${p.failed ? `, не открылось ${count(p.failed)}${p.last_error ? ` — ${esc(p.last_error)}` : ''}` : ''}.</p>`,
+    );
+  }
+  return `<section class="stack">
+      <div class="section-label"><span>Программы через Cloudflare</span></div>
+      <div class="panel">
+        <div class="settings-row column">
+          <span class="row-text"><span class="row-title-sm">Запуск программы через воркер</span><span class="row-sub wrap">FI запускает программу так, что её интернет идёт через ваш воркер — с не российского адреса. Подходит программам, которые умеют работать через прокси: браузеры, Spotify и другие на Chromium и Electron, многие лаунчеры и утилиты. Сайты, которые сами стоят за Cloudflare (Discord, ChatGPT), воркер открыть не может — к ним программа пойдёт напрямую. Игры и звонки ходят по UDP — их так не провести.</span></span>
+          <div class="button-row"><button class="btn sm" data-action="program-add" ${s.busy ? 'disabled' : ''}>Добавить программу…</button></div>
+          ${notes.join('')}
         </div>
-        <div class="settings-row">
-          <span class="row-text"><span class="row-title-sm">Свежие ролики YouTube через воркер</span><span class="row-sub wrap">Популярное YouTube отдаёт с кэша провайдера, а свежее и редкое — с серверов Google, которые провайдер может закрыть целиком: обход DPI их не откроет. Видеосерверы пойдут через FI: напрямую, если сервер отвечает, и через воркер, если молчит. Включает и сценарий прокси ниже.</span></span>
-          <button class="toggle ${st.youtube_via_worker ? 'on' : ''}" role="switch" aria-checked="${Boolean(st.youtube_via_worker)}" aria-label="Свежие ролики YouTube через воркер" data-action="youtube-via-worker" ${!tg.enabled || !tg.worker ? 'disabled' : ''}></button>
-        </div>
-        <div class="settings-row">
-          <span class="row-text"><span class="row-title-sm">Применять в браузерах</span><span class="row-sub wrap">FI поставит в Windows сценарий настройки прокси (Параметры → Сеть и Интернет → Прокси-сервер): через FI пойдут только сайты из списка и видеосерверы YouTube, если они включены выше, остальное — напрямую. Пока VPN (например Happ) держит свой системный прокси, браузеры ведёт он, а FI вернёт сценарий, когда VPN выключат. Выключите здесь или уберите сценарий в Windows сами — FI его больше не поставит.</span></span>
-          <button class="toggle ${st.via_worker_browsers ? 'on' : ''}" role="switch" aria-checked="${Boolean(st.via_worker_browsers)}" aria-label="Применять в браузерах" data-action="via-worker-browsers" ${!sites.length && !st.youtube_via_worker ? 'disabled' : ''}></button>
-        </div>
+        ${rows}
       </div>
     </section>`;
 }
@@ -1116,7 +1416,38 @@ const appearKey = (el) => `${el.className.replace(' appear', '')}|${el.textConte
 
 const FOCUS_KEYS = ['action', 'screen', 'mode', 'host', 'service', 'fix', 'game', 'path', 'value', 'name'];
 
+// Пока кнопка мыши нажата, окно не перерисовывается: перерисовка заменяет все элементы, и щелчок,
+// начатый на старой кнопке, пропал бы — человек нажал, а ничего не случилось. Отложенная
+// перерисовка проходит сразу после отпускания. Срок нужен на случай, когда отпускание до окна не
+// дошло (окно потащили за заголовок): без него оно перестало бы обновляться.
+const PRESS_MAX = 1200;
+let pressTimer = 0;
+let renderHeld = false;
+
+function pressStart() {
+  clearTimeout(pressTimer);
+  pressTimer = setTimeout(pressEnd, PRESS_MAX);
+}
+
+function pressEnd() {
+  if (!pressTimer) return;
+  clearTimeout(pressTimer);
+  pressTimer = 0;
+  if (!renderHeld) return;
+  renderHeld = false;
+  setTimeout(render, 0); // после click: его обработчик перерисует окно сам, если что-то изменил
+}
+
+document.addEventListener('pointerdown', pressStart, true);
+document.addEventListener('pointerup', pressEnd, true);
+document.addEventListener('pointercancel', pressEnd, true);
+window.addEventListener('blur', pressEnd);
+
 function render() {
+  if (pressTimer) {
+    renderHeld = true;
+    return;
+  }
   const html = view();
   if (html === lastHTML) return; // опрос без изменений не сбивает фокус и анимации
   lastHTML = html;
@@ -1154,6 +1485,9 @@ function render() {
 }
 
 function go(screen) {
+  if (state.screen === 'cloudflare' && screen !== 'cloudflare') leaveCloudflare();
+  if (screen !== state.screen) state.programs = idlePrograms(); // итог запуска программы — до ухода с экрана
+  if (screen === 'look' || screen === 'cloudflare') state.from = state.screen === screen ? state.from : state.screen;
   state.screen = screen;
   state.message = '';
   state.notice = '';
@@ -1176,8 +1510,10 @@ function handleError(err, onMessage = (m) => (state.message = m)) {
 
 async function refresh() {
   try {
+    const prev = state.status;
     state.status = await api('status');
     state.unavailable = false;
+    noteSetup(prev, state.status);
   } catch (err) {
     handleError(err);
   }
@@ -1188,12 +1524,176 @@ async function command(method, params) {
   state.message = '';
   try {
     const result = await api(method, params);
-    if (result && typeof result === 'object' && 'enabled' in result) state.status = result;
+    if (result && typeof result === 'object' && 'enabled' in result) {
+      const prev = state.status;
+      state.status = result;
+      noteSetup(prev, result);
+    }
     state.unavailable = false;
   } catch (err) {
     handleError(err);
   }
   render();
+  showError();
+  schedule();
+}
+
+// showError прокручивает окно к сообщению об ошибке: оно стоит вверху экрана, а кнопку человек
+// мог нажать далеко внизу — и тогда казалось бы, что ничего не случилось.
+function showError() {
+  if (state.message) document.querySelector('main > .field-error')?.scrollIntoView({ block: 'nearest' });
+}
+
+// ─── Cloudflare: действия ─────────────────────────────────────────────────
+
+// cfSummary — одна строка про воркер для экрана настроек.
+function cfSummary(st) {
+  const tg = st.telegram ?? {};
+  const cf = st.cloudflare ?? {};
+  if (!tg.worker) {
+    return 'Личный бесплатный сервер: через него идут Telegram, когда его адреса закрыты, сайты, недоступные из России, закрытые ролики YouTube и программы. Настройка — три шага.';
+  }
+  if (cf.limited_until) return `Суточный лимит исчерпан — заработает в ${clockText(cf.limited_until)}`;
+  let head = 'Работает';
+  if (tg.worker_outdated || tg.worker_key_ok === false) head = 'Нужно обновить код';
+  else if (tg.worker_update) head = 'Есть обновление кода';
+  return `${head} · сегодня ${count(cf.requests)} из ${count(cf.limit || 100000)} запросов`;
+}
+
+// leaveCloudflare — уходим с экрана Cloudflare: итог настройки уже показан, а токен в памяти
+// окна держать незачем.
+function leaveCloudflare() {
+  const setup = state.status?.cloudflare?.setup;
+  if (setup && !setup.busy) api('clear_worker_setup').catch(() => {});
+  state.cf = { ...state.cf, wizard: false, token: '', error: '', hint: '', formHelp: false };
+  state.programs = idlePrograms();
+  state.viaWorkerError = '';
+}
+
+async function cfOpen(page) {
+  const data = await postJSON('/app/cloudflare/open', { page });
+  if (!data || data.error) {
+    state.cf.error = data?.error ?? 'Не удалось открыть браузер';
+    render();
+  }
+}
+
+// cfPaste вставляет токен из буфера обмена. quiet — буфер проверяется сам, когда человек вернулся
+// из браузера: подставляем, только если там точно токен, и ни о чём не спрашиваем.
+async function cfPaste(quiet = false) {
+  const data = await postJSON('/app/clipboard');
+  const text = (data?.text ?? '').trim();
+  if (!looksLikeToken(text)) {
+    if (!quiet) {
+      state.cf.error = text
+        ? 'В буфере обмена не токен Cloudflare. Скопируйте его кнопкой Copy на странице Cloudflare.'
+        : 'Буфер обмена пуст: скопируйте токен кнопкой Copy на странице Cloudflare.';
+      render();
+    }
+    return;
+  }
+  if (state.cf.token === text) return;
+  state.cf.token = text;
+  state.cf.error = '';
+  state.cf.hint = quiet ? 'Токен вставлен из буфера обмена — осталось нажать «Создать воркер».' : '';
+  render();
+}
+
+// setupWorker отдаёт токен службе: она проверяет его, загружает воркер и подключает к FI.
+async function setupWorker() {
+  const s = state.cf;
+  const token = (document.getElementById('cf-token-input')?.value ?? s.token).trim();
+  s.token = token;
+  s.hint = '';
+  if (!token) {
+    s.error = 'Вставьте токен: шаг 2 выше, потом кнопка «Вставить».';
+    render();
+    return;
+  }
+  if (!looksLikeToken(token)) {
+    s.error = 'Это не похоже на токен Cloudflare: он состоит из 40 латинских букв и цифр. Скопируйте его кнопкой Copy сразу после создания.';
+    render();
+    return;
+  }
+  s.error = '';
+  try {
+    state.status = await api('setup_worker', { token, region: s.region, remember: s.remember });
+  } catch (err) {
+    handleError(err, (m) => (s.error = m));
+  }
+  render();
+  schedule();
+}
+
+// noteSetup следит за настройкой воркера между опросами: закончилась удачно — мастер закрывается,
+// а токен из памяти окна убирается.
+function noteSetup(prev, cur) {
+  const was = prev?.cloudflare?.setup;
+  const now = cur?.cloudflare?.setup;
+  if (!was?.busy || !now || now.busy || !now.done) return;
+  state.cf = { ...state.cf, wizard: false, token: '', error: '', hint: '' };
+  if (now.update) state.notice = 'Код воркера обновлён.';
+  else if (cur.youtube_blocked && !cur.youtube_via_worker && !cur.vpn) state.notice = 'Готово: воркер создан и подключён. Остался один шаг — включите ниже «Ролики, закрытые провайдером», и YouTube пойдёт через него.';
+  else state.notice = 'Готово: воркер создан и подключён. Telegram уже идёт через него; сайты и программы добавляются ниже.';
+}
+
+// cfUpdate обновляет код воркера: сохранённым токеном — сразу, без него — через шаги мастера.
+function cfUpdate() {
+  const cf = state.status?.cloudflare ?? {};
+  if (cf.has_token && !cf.token_error) {
+    command('update_worker');
+    return;
+  }
+  state.cf = { ...state.cf, wizard: true, error: '', hint: 'Чтобы обновить воркер, FI нужен токен: пройдите шаги 2 и 3. С галочкой «Запомнить» дальше FI будет обновлять воркер сам.' };
+  state.programs = idlePrograms();
+  render();
+}
+
+// ─── Программы через Cloudflare ───────────────────────────────────────────
+
+// showProgram прокручивает окно к строке программы: вопрос или итог запуска удлинили её, и без
+// прокрутки они остались бы под кромкой окна.
+function showProgram(path) {
+  const row = [...document.querySelectorAll('[data-action="program-run"]')].find((el) => el.dataset.path === path);
+  (row?.closest('.quick, .settings-row') ?? document.querySelector('.quick'))?.scrollIntoView({ block: 'nearest', behavior: state.look?.motion === false ? 'auto' : 'smooth' });
+}
+
+async function programAdd() {
+  const s = state.programs;
+  Object.assign(s, { busy: true, error: '', notice: '', confirm: '', path: '' });
+  render();
+  const data = await postJSON('/app/programs/add');
+  s.busy = false;
+  if (!data) s.error = 'Окно потеряло связь со своей частью на Go';
+  else if (data.error) s.error = data.error;
+  else if (data.status) {
+    state.status = data.status;
+    s.path = data.path ?? '';
+    s.notice = 'Программа добавлена. Нажмите «Запустить» — она откроется через Cloudflare.';
+  }
+  render();
+  if (s.path && s === state.programs) showProgram(s.path);
+}
+
+// programRun запускает программу через прокси службы. Если она уже запущена, сперва спрашиваем:
+// прокси программа узнаёт только при запуске, поэтому её придётся закрыть.
+async function programRun(path, restart = false) {
+  const s = state.programs;
+  const name = (state.status?.programs?.apps ?? []).find((a) => a.path === path)?.name ?? 'Программа';
+  Object.assign(s, { busy: true, error: '', notice: '', confirm: '', path });
+  render();
+  const data = await postJSON('/app/programs/run', { path, restart });
+  s.busy = false;
+  if (!data) s.error = 'Окно потеряло связь со своей частью на Go';
+  else if (data.error) s.error = data.error;
+  else if (data.running) s.confirm = path;
+  else if (data.started) {
+    s.notice = data.chromium
+      ? `Программа «${name}» запущена через Cloudflare.`
+      : `Программа «${name}» запущена. Через Cloudflare пойдёт всё, что она открывает с учётом настроек прокси. Если программа их не читает и её сайты не открываются, добавьте их в «Сайты через воркер».`;
+  }
+  render();
+  if (s === state.programs) showProgram(path);
   schedule();
 }
 
@@ -1222,6 +1722,29 @@ async function addSite(force = false) {
   await refresh();
 }
 
+// addViaWorkerSite добавляет сайт из поля на экране Cloudflare. Отказ (сайт стоит за Cloudflare,
+// и воркер его не откроет) показывается под полем, а введённое остаётся — можно поправить.
+async function addViaWorkerSite() {
+  const host = (document.getElementById('via-worker-input')?.value ?? '').trim();
+  state.viaWorkerError = '';
+  if (!host) {
+    state.viaWorkerError = 'Введите адрес сайта, например soundcloud.com';
+    render();
+    return;
+  }
+  state.viaWorker = host;
+  try {
+    const result = await api('add_via_worker', { host });
+    if (result && typeof result === 'object' && 'enabled' in result) state.status = result;
+    state.viaWorker = null;
+  } catch (err) {
+    handleError(err, (m) => (state.viaWorkerError = m));
+  }
+  render();
+  document.querySelector('[data-form="via-worker"] + .field-error')?.scrollIntoView({ block: 'nearest' });
+  schedule();
+}
+
 // addViaWorker пускает сайт через свой воркер — с не российского IP, как VPN только для него.
 async function addViaWorker() {
   const s = state.site;
@@ -1242,7 +1765,7 @@ async function addViaWorker() {
       verdict: 'via_worker',
       message: browsers
         ? 'Сайт пойдёт через ваш Cloudflare Worker — с не российского IP. Обновите страницу в браузере.'
-        : 'Сайт пойдёт через ваш Cloudflare Worker — с не российского IP. В Telegram — сразу, а в браузерах — когда включите «Применять в браузерах».',
+        : 'Сайт пойдёт через ваш Cloudflare Worker — с не российского IP. В Telegram — сразу, а в браузерах — когда включите «Открывать в браузерах».',
       browsers: !browsers,
     };
     s.input = '';
@@ -1274,34 +1797,6 @@ async function paste() {
   state.site.error = '';
   render();
   document.getElementById('site-input')?.focus();
-}
-
-// deployWorker разворачивает воркер в Cloudflare по токену; токен не остаётся ни в окне, ни в FI.
-async function deployWorker() {
-  const token = (document.getElementById('cf-token-input')?.value ?? state.cfToken ?? '').trim();
-  const region = document.getElementById('cf-region')?.value ?? state.cfRegion ?? 'de';
-  if (!token) {
-    state.message = 'Вставьте токен Cloudflare';
-    render();
-    return;
-  }
-  state.deploying = true;
-  state.message = '';
-  state.notice = '';
-  render();
-  const data = await postJSON('/app/worker/deploy', { token, region });
-  state.deploying = false;
-  if (!data) state.message = 'Окно потеряло связь со своей частью на Go';
-  else if (data.error) state.message = data.error;
-  else {
-    if (data.status) state.status = data.status;
-    state.worker = null;
-    state.notice = `Воркер развёрнут: ${data.domain}. Сайты через воркер и Telegram уже идут через него.`;
-  }
-  state.cfToken = null; // токен больше не нужен — не держим его даже в памяти окна
-  const field = document.getElementById('cf-token-input');
-  if (field) field.value = '';
-  render();
 }
 
 async function loadAutostart() {
@@ -1467,13 +1962,53 @@ document.addEventListener('click', (event) => {
       command('remove_via_worker', { host: el.dataset.host });
       break;
     case 'worker-copy':
-      fileAction('/app/worker/copy', () => 'Код воркера скопирован. В Cloudflare: воркер → Edit code → стереть всё, вставить → Deploy, затем «Проверить воркер».');
+      fileAction('/app/worker/copy', () => 'Код воркера скопирован. В Cloudflare: воркер → Edit code → стереть всё, вставить → Deploy, затем «Проверить» здесь.');
       break;
     case 'worker-recheck':
       command('recheck_worker');
       break;
-    case 'worker-deploy':
-      deployWorker();
+    case 'cf-open':
+      cfOpen(el.dataset.page);
+      break;
+    case 'cf-paste':
+      cfPaste();
+      break;
+    case 'cf-flag': // раскрыть или скрыть подсказку
+      state.cf[el.dataset.name] = !state.cf[el.dataset.name];
+      render();
+      break;
+    case 'cf-wizard':
+      state.cf = { ...state.cf, wizard: true, error: '', hint: '' };
+      state.programs = idlePrograms();
+      state.notice = '';
+      render();
+      break;
+    case 'cf-wizard-close':
+      state.cf = { ...state.cf, wizard: false, token: '', error: '', hint: '' };
+      render();
+      break;
+    case 'cf-update':
+      cfUpdate();
+      break;
+    case 'cf-forget':
+      command('forget_cf_token');
+      break;
+    case 'program-add':
+      programAdd();
+      break;
+    case 'program-run':
+      programRun(el.dataset.path);
+      break;
+    case 'program-restart':
+      programRun(el.dataset.path, true);
+      break;
+    case 'program-cancel':
+      state.programs.confirm = '';
+      render();
+      break;
+    case 'program-remove':
+      state.programs = idlePrograms();
+      command('remove_app', { path: el.dataset.path });
       break;
     case 'custom-add':
       fileAction('/app/strategy/import', (d) => (d.name ? `Стратегия «${d.name}» добавлена — её можно выбрать в списке или запустить подбор` : ''));
@@ -1497,7 +2032,8 @@ document.addEventListener('click', (event) => {
       command('set_auto_update', { on: !state.status?.base?.auto_update });
       break;
     case 'back':
-      go(state.screen === 'look' ? 'settings' : 'main');
+      // Вложенные экраны возвращают туда, откуда их открыли: Cloudflare — с главного или из настроек.
+      go(state.screen === 'look' ? 'settings' : state.screen === 'cloudflare' && state.from === 'settings' ? 'settings' : 'main');
       break;
     case 'open':
       go(el.dataset.screen);
@@ -1601,10 +2137,10 @@ document.addEventListener('click', (event) => {
 
 document.addEventListener('submit', (event) => {
   const form = event.target.dataset.form;
-  if (form !== 'site' && form !== 'worker' && form !== 'via-worker' && form !== 'worker-deploy') return;
+  if (form !== 'site' && form !== 'worker' && form !== 'via-worker' && form !== 'cf-setup') return;
   event.preventDefault();
-  if (form === 'worker-deploy') {
-    deployWorker();
+  if (form === 'cf-setup') {
+    setupWorker();
     return;
   }
   if (form === 'site') {
@@ -1612,9 +2148,7 @@ document.addEventListener('submit', (event) => {
     return;
   }
   if (form === 'via-worker') {
-    const host = document.getElementById('via-worker-input')?.value ?? '';
-    state.viaWorker = null;
-    command('add_via_worker', { host });
+    addViaWorkerSite();
     return;
   }
   const host = document.getElementById('worker-input')?.value ?? '';
@@ -1629,10 +2163,19 @@ document.addEventListener('input', (event) => {
   }
   if (event.target.id === 'via-worker-input') {
     state.viaWorker = event.target.value;
+    if (state.viaWorkerError) {
+      state.viaWorkerError = '';
+      render();
+    }
     return;
   }
   if (event.target.id === 'cf-token-input') {
-    state.cfToken = event.target.value; // переживает перерисовку окна, пока воркер не развёрнут
+    state.cf.token = event.target.value; // переживает перерисовку окна, пока воркер не создан
+    if (state.cf.error || state.cf.hint) {
+      state.cf.error = '';
+      state.cf.hint = '';
+      render();
+    }
     return;
   }
   if (event.target.id !== 'site-input') return;
@@ -1648,12 +2191,19 @@ document.addEventListener('input', (event) => {
 let timer;
 function schedule() {
   clearTimeout(timer);
-  const busy = Boolean(state.status?.task) || state.site.busy;
+  const busy = Boolean(state.status?.task) || state.site.busy || Boolean(state.status?.cloudflare?.setup?.busy);
   timer = setTimeout(async () => {
     if (document.visibilityState === 'visible') await refresh();
     schedule();
   }, busy ? 1000 : 4000);
 }
+
+// Человек создал токен в браузере и вернулся в окно FI: если в буфере обмена токен, а поле ещё
+// пустое, подставляем его сами — одним действием меньше.
+window.addEventListener('focus', () => {
+  const st = state.status;
+  if (state.screen === 'cloudflare' && st && cfWizardOpen(st) && !state.cf.token && !st.cloudflare?.setup?.busy) cfPaste(true);
+});
 
 document.addEventListener('change', (event) => {
   if (event.target.id === 'font-select') {
@@ -1665,7 +2215,11 @@ document.addEventListener('change', (event) => {
     return;
   }
   if (event.target.id === 'cf-region') {
-    state.cfRegion = event.target.value;
+    state.cf.region = event.target.value;
+    return;
+  }
+  if (event.target.id === 'cf-remember') {
+    state.cf.remember = event.target.checked;
     return;
   }
   if (event.target.id !== 'strategy-select') return;

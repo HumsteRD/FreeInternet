@@ -508,6 +508,7 @@ main > .panel { flex: none; }
 }
 .chip:hover { background: var(--hover); color: var(--text); }
 .chip.on { background: var(--violet-tint); border-color: var(--violet-line); color: var(--violet-text); }
+.chip.warn { background: var(--amber-tint); border-color: transparent; color: var(--amber-text); }
 
 @keyframes spin { to { transform: rotate(360deg); } }
 .spin { animation: spin 0.9s linear infinite; animation-delay: calc(0s - var(--since, 0ms)); }
@@ -597,3 +598,43 @@ main > .panel { flex: none; }
 .swatch.custom { overflow: hidden; background: conic-gradient(#FF5FA8, #F59E0B, #3FB66B, #00D9F5, #2F8CF0, #7C4FE0, #FF5FA8); }
 .swatch.custom input { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; cursor: pointer; }
 .swatch:focus-visible, .theme-card:focus-visible { outline: 2px solid var(--violet-text); outline-offset: 2px; }
+
+/* ─── Экран «Cloudflare»: мастер настройки, расход, сайты и программы через воркер ─── */
+.onboarding.compact { padding-top: 4px; }
+.steps { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.step { display: flex; gap: 12px; padding: 14px; background: var(--panel); border: 1px solid var(--line); border-radius: var(--r-lg); }
+.step-num {
+  flex: none; width: 24px; height: 24px; border-radius: 12px; display: grid; place-items: center;
+  font-size: 12.5px; font-weight: 700; color: var(--violet-text); background: var(--violet-tint); border: 1px solid var(--violet-line);
+}
+.step-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 8px; }
+.mini-steps { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 3px; font-size: 12px; line-height: 16px; color: var(--text-2); }
+.mini-steps b, .row-sub b, .note b { color: var(--text); font-weight: 600; }
+.stack-sm { display: flex; flex-direction: column; gap: 10px; }
+.field { display: flex; flex-direction: column; gap: 4px; }
+/* В колонке flex: 1 из .select сжал бы список до высоты текста. */
+.field .select { flex: none; width: 100%; height: 36px; }
+.input-row .input + .btn.sm { height: 40px; padding: 0 12px; }
+.check { display: flex; gap: 8px; align-items: flex-start; font-size: 12px; line-height: 16px; color: var(--text-2); cursor: pointer; }
+.check input { flex: none; width: 14px; height: 14px; margin: 1px 0 0; accent-color: var(--violet); }
+.link-btn {
+  align-self: flex-start; padding: 0; border: 0; background: none; font: inherit; font-size: 12px;
+  color: var(--violet-text); cursor: pointer; text-decoration: underline; text-underline-offset: 2px;
+}
+.link-btn:focus-visible { outline: 2px solid var(--violet-text); outline-offset: 2px; border-radius: 2px; }
+.busy-line { display: flex; align-items: center; gap: 8px; font-size: 12.5px; font-weight: 600; color: var(--text); }
+.status-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.meter { height: 6px; border-radius: 3px; background: var(--neutral-tint); overflow: hidden; }
+.meter > span { display: block; height: 100%; min-width: 2px; border-radius: 3px; background: var(--violet); }
+.meter.warn > span { background: var(--amber-text); }
+.meter.fail > span { background: var(--red); }
+.note { font-size: 12px; line-height: 16px; color: var(--text-2); text-wrap: pretty; overflow-wrap: anywhere; }
+.note.warn { color: var(--amber-text); }
+.note.fail { color: var(--red-text); }
+.app-row { display: flex; align-items: center; gap: 8px; }
+.app-row .row-text { gap: 0; }
+.app-row .btn { flex: none; }
+.quick { display: flex; flex-direction: column; gap: 8px; padding: 10px 12px; }
+.quick-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.quick-label { font-size: 12px; font-weight: 600; color: var(--text-3); margin-right: 2px; }
+.chip.run { display: inline-flex; align-items: center; gap: 5px; }

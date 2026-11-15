@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 )
@@ -89,5 +90,58 @@ func TestDeployBadToken(t *testing.T) {
 	_, err := (&Client{Token: "wrong"}).Deploy(context.Background(), "x", Regions["de"])
 	if err == nil || !strings.Contains(err.Error(), "не принял токен") {
 		t.Fatalf("ошибка: %v", err)
+	}
+}
+
+// TestAPIErrorText: отказы Cloudflare объясняются словами, по которым понятно, что делать.
+func TestAPIErrorText(t *testing.T) {
+	cases := []struct {
+		err      APIError
+		want     string
+		badToken bool
+	}{
+		{APIError{Status: 400, Code: 6003, Msg: "Invalid request headers"}, "не похоже на токен", true},
+		{APIError{Status: 403, Code: 10000, Msg: "Authentication error"}, "не принял токен", true},
+		{APIError{Status: 403, Code: 10034, Msg: "You need to verify your email address to use Workers."}, "подтвердить почту", true},
+		{APIError{Status: 400, Code: 10021, Msg: "Uncaught SyntaxError"}, "Uncaught SyntaxError (код 10021)", false},
+	}
+	for _, c := range cases {
+		if got := c.err.Error(); !strings.Contains(got, c.want) || c.err.BadToken() != c.badToken {
+			t.Errorf("%+v: %q (токен плохой: %v), ждали %q и %v", c.err, got, c.err.BadToken(), c.want, c.badToken)
+		}
+	}
+}
+
+func TestLooksLikeToken(t *testing.T) {
+	for s, want := range map[string]bool{
+		"aB3dE6gH9jK2mN5pQ8sT1vW4yZ7cF0hJ3lM6oR9u":       true, // так выглядит токен Cloudflare
+		"aB3dE6gH9jK2mN5pQ8sT1vW4yZ7cF0hJ3lM6oR_-x":      true,
+		"https://dash.cloudflare.com/profile/api-tokens": false,
+		"мой пароль 123":                                 false,
+		"короткий":                                       false,
+		"":                                               false,
+	} {
+		if got := LooksLikeToken(s); got != want {
+			t.Errorf("LooksLikeToken(%q) = %v", s, got)
+		}
+	}
+}
+
+// TestTokenURL: ссылка на создание токена несёт права, без которых воркер не загрузить.
+func TestTokenURL(t *testing.T) {
+	u, err := url.Parse(TokenURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var groups []struct{ Key, Type string }
+	if err := json.Unmarshal([]byte(u.Query().Get("permissionGroupKeys")), &groups); err != nil {
+		t.Fatalf("права в ссылке не разобрать: %v", err)
+	}
+	have := map[string]string{}
+	for _, g := range groups {
+		have[g.Key] = g.Type
+	}
+	if have["workers_scripts"] != "edit" || have["account_settings"] != "read" || u.Query().Get("name") != "FI" {
+		t.Fatalf("ссылка на токен: %v, имя %q", have, u.Query().Get("name"))
 	}
 }

@@ -113,7 +113,12 @@ func (s *Server) measureEdges(host string) {
 	candidates := slices.DeleteFunc(slices.Clone(edgeCandidates), func(ip string) bool { return now.Before(e.bad[ip]) })
 	e.mu.Unlock()
 
-	list := pickEdges(ctx, host, candidates)
+	var list []Edge
+	if !s.workerLimited() { // с исчерпанным лимитом проверять нечем: воркер ответит отказом
+		var checks int
+		list, checks = pickEdges(ctx, host, candidates)
+		s.noteRequests(checks) // проверки входов — тоже запросы к воркеру
+	}
 	e.mu.Lock()
 	e.busy, e.at, e.host = false, time.Now(), host
 	// Пустой замер (сети нет, воркер не ответил) прежние входы не стирает — кроме отказавших.
@@ -131,7 +136,7 @@ func (s *Server) measureEdges(host string) {
 }
 
 // pickEdges — до edgeKeep адресов с самым быстрым рукопожатием TLS, через которые ответил воркер host.
-func pickEdges(ctx context.Context, host string, candidates []string) []Edge {
+func pickEdges(ctx context.Context, host string, candidates []string) (picked []Edge, checks int) {
 	var mu sync.Mutex
 	var measured []Edge
 	var wg sync.WaitGroup
@@ -161,13 +166,13 @@ func pickEdges(ctx context.Context, host string, candidates []string) []Edge {
 		}()
 	}
 	wg.Wait()
-	var picked []Edge
+
 	for i, e := range top {
 		if ok[i] && len(picked) < edgeKeep {
 			picked = append(picked, e)
 		}
 	}
-	return picked
+	return picked, len(top)
 }
 
 // pingEdge — лучшее из двух рукопожатий TLS с host через ip, от начала соединения: сертификат

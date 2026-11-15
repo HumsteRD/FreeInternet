@@ -39,7 +39,7 @@ func TestLiveWorkerSpeed(t *testing.T) {
 		srv.edge.host, srv.edge.at = worker, time.Now() // без быстрых входов: только DNS
 		name := "адреса из DNS"
 		if fast {
-			srv.edge.list = pickEdges(context.Background(), worker, edgeCandidates)
+			srv.edge.list, _ = pickEdges(context.Background(), worker, edgeCandidates)
 			name = "быстрые входы"
 			t.Logf("входы: %+v", srv.edge.list)
 		}
@@ -78,7 +78,7 @@ func TestLiveWorkerSpeed(t *testing.T) {
 		// отличить обрыв по объёму от обрыва по времени.
 		secs, _ := strconv.Atoi(os.Getenv("FI_SPEED_SECONDS"))
 		rate, _ := strconv.ParseFloat(os.Getenv("FI_SPEED_RATE"), 64)
-		deadline := time.AfterFunc(time.Duration(max(secs, 20))*time.Second, func() { resp.Body.Close() })
+		deadline := time.AfterFunc(time.Duration(max(secs, 4))*time.Second, func() { resp.Body.Close() })
 		var n int64
 		var copyErr error
 		buf := make([]byte, 256<<10)

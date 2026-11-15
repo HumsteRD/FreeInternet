@@ -52,6 +52,16 @@ func (d *Daemon) AddSite(ctx context.Context, input string, force bool) (SiteRes
 	}
 	res := SiteResult{Host: host, Before: before.Status}
 	action := siteActionFor(before.Status)
+	// Совет «через воркер» годится не всем: сайт, который сам стоит за Cloudflare, воркер
+	// Cloudflare открыть не может (tgproxy/cfnet.go). Тогда честный совет один — VPN.
+	if (action.verdict == "tunnel" || action.verdict == "unreachable") && d.behindCloudflare(host) {
+		if action.verdict == "tunnel" {
+			action.message = "Сайт сам ограничивает доступ из России. Он стоит за Cloudflare, а воркер Cloudflare к таким сайтам не подключается — здесь поможет только VPN."
+		} else {
+			action.message = "Сервер не отвечает: он заблокирован по адресу или не работает. Обход тут не поможет, а воркер не откроет сайт, который сам стоит за Cloudflare, — попробуйте VPN."
+		}
+		action.verdict = "vpn"
+	}
 	res.Verdict, res.Message = action.verdict, action.message
 	opens := before.Status == probe.OK || before.Status == probe.Slow
 	if !action.add && !(force && opens) {
@@ -312,9 +322,9 @@ func siteActionFor(s probe.Status) siteAction {
 	case probe.DNSSpoof:
 		return siteAction{"dns", "Провайдер подменяет адрес сайта в DNS. Включите в браузере безопасный DNS (DNS поверх HTTPS); если не поможет — «Публичный DNS» в настройках FI.", false}
 	case probe.HTTPBlocked:
-		return siteAction{"tunnel", "Сайт сам ограничивает доступ из России. Добавьте его в «Сайты через воркер» в настройках.", false}
+		return siteAction{"tunnel", "Сайт сам ограничивает доступ из России. Добавьте его в «Сайты через воркер» — раздел «Cloudflare» в настройках.", false}
 	case probe.TCPFail:
-		return siteAction{"unreachable", "Сервер не отвечает: он заблокирован по адресу или не работает. Обход DPI тут не поможет — попробуйте «Сайты через воркер» в настройках.", false}
+		return siteAction{"unreachable", "Сервер не отвечает: он заблокирован по адресу или не работает. Обход DPI тут не поможет — попробуйте «Сайты через воркер» — раздел «Cloudflare» в настройках.", false}
 	case probe.DNSFail:
 		return siteAction{"not_found", "Такой сайт не найден. Проверьте адрес.", false}
 	case probe.TLSCert:

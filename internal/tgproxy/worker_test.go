@@ -224,15 +224,15 @@ func TestWorkerScript(t *testing.T) {
 	t.Log(strings.TrimSpace(string(out)))
 }
 
-// TestWorkerVersionMatchesCode: служба сверяет версию воркера с WorkerVersionFast — она должна
+// TestWorkerVersionMatchesCode: служба сверяет версию воркера с WorkerVersionCurrent — она должна
 // совпадать с номером в самом коде, иначе окно вечно просило бы обновить воркер.
 func TestWorkerVersionMatchesCode(t *testing.T) {
 	m := regexp.MustCompile(`const VERSION = (\d+);`).FindStringSubmatch(workerSource)
 	if m == nil {
 		t.Fatal("в коде воркера нет номера версии")
 	}
-	if v, _ := strconv.Atoi(m[1]); v != WorkerVersionFast {
-		t.Fatalf("версия в коде воркера %d, а WorkerVersionFast = %d", v, WorkerVersionFast)
+	if v, _ := strconv.Atoi(m[1]); v != WorkerVersionCurrent {
+		t.Fatalf("версия в коде воркера %d, а WorkerVersionCurrent = %d", v, WorkerVersionCurrent)
 	}
 }
 

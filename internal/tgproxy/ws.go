@@ -55,6 +55,24 @@ type wsConn struct {
 	// lastRecv — когда пришёл последний кадр, любой (и pong): по нему сторож соединений
 	// с воркером видит, что соединение живо.
 	lastRecv atomic.Int64
+	// Обрыв посреди передачи (usage.go): recvBytes — сколько данных пришло, closed — соединение
+	// закрыли мы сами, onCut — кому сообщить; вызывается не больше раза.
+	recvBytes atomic.Int64
+	closed    atomic.Bool
+	onCut     func()
+	cutOnce   sync.Once
+}
+
+// ended разбирает, чем кончилось чтение: соединение через воркер закрылось без кадра закрытия,
+// пока шли данные, — это обрыв со стороны Cloudflare, а не конец передачи.
+func (w *wsConn) ended() {
+	if w.onCut == nil || w.closed.Load() || w.closeCode != 0 || w.recvBytes.Load() < cutMinBytes {
+		return
+	}
+	if time.Since(time.Unix(0, w.lastRecv.Load())) > cutActive {
+		return // молчало и закрылось: простой, а не обрыв передачи
+	}
+	w.cutOnce.Do(w.onCut)
 }
 
 // statusError — сервер ответил не переходом на WebSocket.
@@ -198,6 +216,7 @@ func (w *wsConn) recv() ([]byte, error) {
 	for {
 		fin, op, payload, err := w.readFrame()
 		if err != nil {
+			w.ended()
 			return nil, err
 		}
 		switch op {
@@ -265,6 +284,7 @@ func (w *wsConn) readFrame() (fin bool, op byte, payload []byte, err error) {
 	if _, err = io.ReadFull(w.br, payload); err != nil {
 		return
 	}
+	w.recvBytes.Add(int64(length))
 	if masked {
 		for i := range payload {
 			payload[i] ^= mask[i%4]
@@ -287,6 +307,7 @@ func (w *wsConn) alive() bool {
 }
 
 func (w *wsConn) close() {
+	w.closed.Store(true)
 	w.writeFrame(opClose, nil)
 	w.conn.Close()
 }

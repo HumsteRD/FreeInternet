@@ -1,13 +1,14 @@
 // Cloudflare Worker для FI: принимает WebSocket и перекладывает байты в дата-центр Telegram
 // (?dc=N), на сайт Telegram для мини-приложений (?host=telegram.org&port=443) или — с ключом
-// FI — на сайты, закрытые для России самими сервисами (SoundCloud и другие).
+// FI — на любой сайт: закрытые для России самими сервисами (SoundCloud и другие), видеосерверы
+// YouTube, закрытые провайдером, и адреса программ, запущенных из FI через Cloudflare.
 // Нужен там, где адреса Telegram закрыты по IP, а Cloudflare открыт.
 //
 // Как поставить:
 //   1. dash.cloudflare.com → Compute → Workers & Pages → Create application →
 //      Start with Hello World! → имя (например fi-tg) → Deploy.
 //   2. Edit code: стереть шаблон в worker.js, вставить код целиком → Deploy. Код с ключом
-//      копирует сам FI: Настройки → «Сайты через воркер» → «Скопировать код воркера».
+//      копирует сам FI: Настройки → Cloudflare → «Ручная настройка» → «Скопировать код».
 //   3. Адрес воркера (fi-tg.имя.workers.dev) вписать в FI без https://:
 //      Настройки → Telegram → «Свой Cloudflare Worker» → Сохранить.
 //
@@ -16,7 +17,7 @@
 
 import { connect } from "cloudflare:sockets";
 
-const VERSION = 7;
+const VERSION = 8;
 
 // KEY — секрет FI: с ним воркер пускает к любым сайтам, без него — только к Telegram, чтобы
 // воркером не воспользовались как открытым прокси. FI вписывает его сам при копировании кода.
@@ -93,17 +94,29 @@ async function bytes(data) {
   throw new Error("сообщение неизвестного вида: " + Object.prototype.toString.call(data));
 }
 
-// Сколько байт читать с сайта за один раз. Бесплатный воркер ограничен процессорным временем,
-// и Cloudflare обрывает соединение, когда оно кончается. Версии по 6-ю пересылали данные
-// кусочками по 4 КБ: на быстрой загрузке (видео, файлы) это тысячи вызовов в секунду, и
-// соединения рвались — то на первых сотнях килобайт, то через сотню мегабайт. Крупными блоками
-// вызовов в десятки раз меньше.
+// Пересылка данных сайта. Бесплатный воркер ограничен процессорным временем, и Cloudflare
+// обрывает соединение, когда оно кончается, — без объяснений, посреди передачи. Время уходит на
+// каждый вызов «прочитал — отправил», а читает Cloudflare кусочками по 4 КБ: на быстрой загрузке
+// (видео, файлы) это тысячи вызовов в секунду. Чем меньше вызовов на мегабайт, тем дольше живёт
+// соединение.
+//
+// Копить данные впрок нельзя: сайт может замолчать в ожидании ответа, и недосланный хвост
+// повис бы навсегда. Но поток почти всегда — TLS, а запись TLS (до 16 КБ) получателю всё равно
+// не нужна по частям, и отправитель шлёт её целиком. Поэтому воркер читает запись до конца одним
+// вызовом: её длина стоит в открытом заголовке. Ждёт он только того, что сайт уже начал слать.
 const BLOCK = 256 * 1024;
+const TLS_HEADER = 5;
+const TLS_RECORD_MAX = 16384 + 2048; // больше в записи TLS не бывает
 
-const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+// readSome читает с сайта не меньше min байт — или сколько есть, если поток кончился.
+function readSome(reader, min, view) {
+  if (min > 1 && typeof reader.readAtLeast === "function") return reader.readAtLeast(min, view);
+  return reader.read(view);
+}
 
-// pump пересылает данные сайта в WebSocket, пока сайт не закроет соединение.
-async function pump(socket, server) {
+// pump пересылает данные сайта в WebSocket, пока сайт не закроет соединение. tls — поток стоит
+// разбирать как записи TLS; если это окажется не TLS, воркер читает по мере прихода.
+async function pump(socket, server, tls) {
   let reader;
   try {
     reader = socket.readable.getReader({ mode: "byob" });
@@ -119,24 +132,43 @@ async function pump(socket, server) {
     return;
   }
   let buffer = new ArrayBuffer(BLOCK);
+  let need = 0; // сколько байт осталось до конца текущей записи TLS
+  let head = []; // байты заголовка записи, прочитанного не целиком
   for (;;) {
-    const { value, done } = await reader.read(new Uint8Array(buffer));
-    if (done) return;
-    const n = value.byteLength;
-    if (n < BLOCK / 4) {
-      // Немного данных (переписка, рукопожатие): отправляем копию, а буфер берём снова.
-      server.send(value.slice());
+    const min = tls ? Math.max(1, Math.min(need, BLOCK)) : 1;
+    const { value, done } = await readSome(reader, min, new Uint8Array(buffer));
+    const n = value ? value.byteLength : 0;
+    if (n > 0) {
+      for (let i = 0; tls && i < n; ) {
+        if (need > 0) {
+          const k = Math.min(need, n - i);
+          need -= k;
+          i += k;
+          continue;
+        }
+        head.push(value[i++]);
+        if (head.length < TLS_HEADER) continue;
+        need = (head[3] << 8) | head[4];
+        if (head[0] < 20 || head[0] > 23 || head[1] !== 3 || need > TLS_RECORD_MAX) {
+          tls = false; // не TLS: дальше — по мере прихода
+          need = 0;
+          break;
+        }
+        head = [];
+      }
+      if (n < BLOCK / 4) {
+        // Немного данных: отправляем копию, а буфер берём снова.
+        server.send(value.slice());
+        buffer = value.buffer;
+      } else {
+        // Много данных: отправляем сам блок, для следующего чтения нужен новый буфер.
+        server.send(value);
+        buffer = new ArrayBuffer(BLOCK);
+      }
+    } else if (value) {
       buffer = value.buffer;
-    } else {
-      // Много данных: отправляем сам блок, для следующего чтения нужен новый буфер.
-      server.send(value);
-      buffer = new ArrayBuffer(BLOCK);
     }
-    // Идёт загрузка: чтение возвращает то, что успело прийти, и без паузы блоки выходили бы
-    // мелкими. За несколько миллисекунд данные копятся в сети — следующий блок крупнее, вызовов
-    // меньше. Отправленное уже ушло, так что ответ сайта пауза не задерживает; мелкие обмены
-    // (меньше 16 КБ) идут без неё.
-    if (n >= 16 * 1024) await pause(n < BLOCK / 2 ? 4 : 1);
+    if (done) return;
   }
 }
 
@@ -218,12 +250,16 @@ export default {
     let address;
     let port = Number(url.searchParams.get("port") || "443");
     if (host) {
-      if (port !== 443) return text("можно только порт 443", 403);
+      // Без ключа — только сайты Telegram на порту 443. С ключом FI — любой сайт и порт: так
+      // ходят программы, запущенные из FI через Cloudflare. Почту (25) Cloudflare не открывает.
+      if (!keyed && port !== 443) return text("без ключа FI можно только порт 443", 403);
       if (!isTelegramWeb(host) && !keyed) {
         return text("без ключа FI можно только сайты Telegram — скопируйте код воркера из FI", 403);
       }
-      if (!/^[a-z0-9.-]+$/i.test(host) || /^[0-9.]+$/.test(host)) return text("нужно имя сайта, а не адрес", 403);
-      address = (await resolveA(host))[0] || host;
+      if (!Number.isInteger(port) || port < 1 || port > 65535 || port === 25) return text("такой порт открыть нельзя", 403);
+      const byAddress = /^[0-9.]+$/.test(host);
+      if (!/^[a-z0-9.-]+$/i.test(host) || (byAddress && !keyed)) return text("нужно имя сайта, а не адрес", 403);
+      address = byAddress ? host : (await resolveA(host))[0] || host;
     } else {
       const table = url.searchParams.get("test") === "1" ? DC_TEST : DC;
       address = table[Number(url.searchParams.get("dc"))];
@@ -276,7 +312,11 @@ export default {
     server.addEventListener("close", () => socket.close().catch(() => {}));
     server.addEventListener("error", () => socket.close().catch(() => {}));
 
-    pump(socket, server).then(
+    // Сайты на порту 443 говорят по TLS; дата-центры Telegram и программы на других портах —
+    // по своим протоколам, их по записям не разобрать. p=0 — пересылать по мере прихода и TLS:
+    // так просит FI, если проверка показала, что чтение записями в этом воркере не работает.
+    const plain = url.searchParams.get("p") === "0";
+    pump(socket, server, !plain && Boolean(host) && port === 443).then(
       () => closeWith(1000, "сервер закрыл соединение"),
       (e) => closeWith(1011, "чтение: " + errText(e)),
     );

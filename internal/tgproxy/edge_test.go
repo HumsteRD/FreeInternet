@@ -43,12 +43,12 @@ func TestPickEdges(t *testing.T) {
 		}
 		return map[string]string{"2.2.2.2": "DME"}[ip], nil
 	}
-	got := pickEdges(context.Background(), "w.example", []string{"1.1.1.1", "2.2.2.2", "3.3.3.3", "4.4.4.4", "5.5.5.5", "6.6.6.6", "9.9.9.9"})
+	got, checks := pickEdges(context.Background(), "w.example", []string{"1.1.1.1", "2.2.2.2", "3.3.3.3", "4.4.4.4", "5.5.5.5", "6.6.6.6", "9.9.9.9"})
 	var ips []string
 	for _, e := range got {
 		ips = append(ips, e.IP)
 	}
-	if !slices.Equal(ips, []string{"2.2.2.2", "4.4.4.4", "1.1.1.1"}) || got[0].Colo != "DME" || got[2].Colo != "" {
+	if !slices.Equal(ips, []string{"2.2.2.2", "4.4.4.4", "1.1.1.1"}) || got[0].Colo != "DME" || got[2].Colo != "" || checks != 5 {
 		t.Fatalf("входы: %+v", got)
 	}
 }
@@ -141,9 +141,16 @@ func (r *refusing) has(ip string) bool {
 // Cloudflare, на остальных — как воркер FI, который пускает к сайту allowed.
 func edgeWorker(t *testing.T, refuse *refusing, allowed string) {
 	t.Helper()
+	edgeWorkerWith(t, refuse, allowed, nil)
+}
+
+// edgeWorkerWith — как edgeWorker, но запрос сначала получает override: true — он ответил сам.
+func edgeWorkerWith(t *testing.T, refuse *refusing, allowed string, override func(http.ResponseWriter, *http.Request) bool) {
+	t.Helper()
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		local, _, _ := net.SplitHostPort(r.Context().Value(http.LocalAddrContextKey).(net.Addr).String())
 		switch {
+		case override != nil && override(w, r):
 		case refuse.has(local):
 			w.Header().Set("Content-Type", "text/plain; charset=UTF-8")
 			w.WriteHeader(http.StatusForbidden)

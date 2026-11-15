@@ -39,6 +39,9 @@ type TelegramStatus struct {
 	// WorkerSlow — код воркера работает, но пересылает данные мелкими кусками: Cloudflare обрывает
 	// из-за этого быстрые загрузки (видео, файлы). Окно советует обновить код.
 	WorkerSlow bool `json:"worker_slow,omitempty"`
+	// WorkerUpdate — в воркере код старее, чем вшит в эту сборку FI. С сохранённым токеном FI
+	// обновит его сам, без токена окно подсказывает, как обновить.
+	WorkerUpdate bool `json:"worker_update,omitempty"`
 	// WorkerKeyOK — в воркере код с ключом FI (нужен сайтам через воркер); nil — не проверяли.
 	WorkerKeyOK *bool `json:"worker_key_ok,omitempty"`
 	// SitesPAC — PAC для браузеров, пока сайты через воркер работают: окно ставит его в Windows.
@@ -77,7 +80,10 @@ func telegramSecret(machine string) []byte {
 	return sum[:16]
 }
 
-func (d *Daemon) telegramStatusLocked() TelegramStatus {
+// telegramStatusLocked — состояние прокси. vpn — VPN, через который сейчас идёт интернет: пока он
+// включён, сценарий прокси для браузеров не нужен — YouTube и закрытые для России сайты ведёт
+// сам VPN, и быстрее, чем воркер. VPN выключат — окно поставит сценарий снова.
+func (d *Daemon) telegramStatusLocked(vpn string) TelegramStatus {
 	st := TelegramStatus{
 		Enabled:   d.cfg.Telegram.Enabled,
 		Address:   telegramAddr(d.cfg.Telegram.Port),
@@ -94,9 +100,10 @@ func (d *Daemon) telegramStatusLocked() TelegramStatus {
 	if st.Enabled && st.Worker != "" {
 		st.WorkerOutdated = d.workerVer > 0 && d.workerVer < tgproxy.WorkerVersionWeb
 		st.WorkerSlow = d.workerVer >= tgproxy.WorkerVersionWeb && d.workerVer < tgproxy.WorkerVersionFast
+		st.WorkerUpdate = d.workerVer > 0 && d.workerVer < tgproxy.WorkerVersionCurrent
 		if len(d.cfg.ViaWorker) > 0 || d.cfg.YouTubeViaWorker {
 			st.WorkerKeyOK = d.workerKeyOK
-			if d.cfg.ViaWorkerBrowsers && d.web != nil && d.web.Listening() {
+			if d.cfg.ViaWorkerBrowsers && d.web != nil && d.web.Listening() && vpn == "" {
 				st.SitesPAC = "http://" + miniAppsAddr(d.cfg.Telegram.Port) + tgproxy.SitesPACPath
 			}
 		}
@@ -270,10 +277,12 @@ func (d *Daemon) startTelegram() {
 	if d.cfg.Telegram.SharedCF {
 		srv.SetCFDomains(d.tgCF)
 	}
+	srv.SeedUsage(d.usage) // счёт запросов к воркеру идёт по суткам Cloudflare, а не от запуска прокси
 	ctx, cancel := context.WithCancel(d.runCtx)
 	done := make(chan struct{})
-	d.tg, d.tgStop, d.tgDone, d.tgErr, d.webErr = srv, cancel, done, "", ""
+	d.tg, d.tgCtx, d.tgStop, d.tgDone, d.tgErr, d.webErr, d.appsErr = srv, ctx, cancel, done, "", "", ""
 	d.webDone = d.startMiniAppsLocked(ctx, srv)
+	d.appsDone = d.startProgramsLocked(ctx, srv)
 
 	go func() {
 		defer close(done)
@@ -292,14 +301,21 @@ func (d *Daemon) startTelegram() {
 // stopTelegram останавливает прокси и дожидается закрытия соединений.
 func (d *Daemon) stopTelegram() {
 	d.mu.Lock()
-	cancel, done, webDone := d.tgStop, d.tgDone, d.webDone
-	d.tg, d.tgStop, d.tgDone, d.web, d.webDone = nil, nil, nil, nil, nil
+	cancel, done, webDone, appsDone := d.tgStop, d.tgDone, d.webDone, d.appsDone
+	if d.tg != nil {
+		d.usage = d.tg.Usage() // следующий запуск прокси продолжит счёт
+	}
+	d.tg, d.tgCtx, d.tgStop, d.tgDone, d.web, d.webDone = nil, nil, nil, nil, nil, nil
+	d.apps, d.appsStop, d.appsDone = nil, nil, nil
 	d.mu.Unlock()
 	if cancel != nil {
 		cancel()
 		<-done
 		if webDone != nil {
 			<-webDone
+		}
+		if appsDone != nil {
+			<-appsDone
 		}
 	}
 }

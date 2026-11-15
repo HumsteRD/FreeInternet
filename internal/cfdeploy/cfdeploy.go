@@ -35,6 +35,18 @@ var Regions = map[string]string{
 // apiBase подменяется в тестах.
 var apiBase = "https://api.cloudflare.com/client/v4"
 
+// Страницы Cloudflare, на которые мастер настройки ведёт человека.
+const (
+	// SignUpURL — регистрация: почта и пароль, карта не нужна.
+	SignUpURL = "https://dash.cloudflare.com/sign-up"
+	// TokenURL — создание токена с уже заполненной формой: права «Workers Scripts: Edit» и
+	// «Account Settings: Read», имя FI. Человеку остаётся нажать «Continue to summary» и
+	// «Create Token». Если форма откроется пустой, годится шаблон «Edit Cloudflare Workers».
+	TokenURL = "https://dash.cloudflare.com/profile/api-tokens?permissionGroupKeys=" +
+		"%5B%7B%22key%22%3A%22workers_scripts%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22account_settings%22%2C%22type%22%3A%22read%22%7D%5D" +
+		"&name=FI&accountId=*&zoneId=all"
+)
+
 // Client — запросы к API Cloudflare от имени токена пользователя.
 type Client struct {
 	Token string
@@ -59,9 +71,25 @@ type APIError struct {
 	Msg    string
 }
 
+// BadToken — Cloudflare отказал из-за самого токена: его нет смысла пробовать снова.
+func (e *APIError) BadToken() bool {
+	msg := strings.ToLower(e.Msg)
+	return e.Status == http.StatusUnauthorized || e.Status == http.StatusForbidden ||
+		e.Code == 10000 || e.Code == 9109 || e.Code == 6003 || e.Code == 6111 ||
+		strings.Contains(msg, "authorization header") || strings.Contains(msg, "invalid request headers")
+}
+
+// Error объясняет отказ словами, по которым человек поймёт, что делать: сообщения Cloudflare
+// написаны для программистов и по-английски.
 func (e *APIError) Error() string {
-	if e.Status == http.StatusUnauthorized || e.Status == http.StatusForbidden || e.Code == 10000 {
-		return "Cloudflare не принял токен: создайте его по шаблону «Edit Cloudflare Workers» (" + e.Msg + ")"
+	msg := strings.ToLower(e.Msg)
+	switch {
+	case e.Code == 10034 || strings.Contains(msg, "email") && strings.Contains(msg, "verif"):
+		return "Cloudflare просит подтвердить почту: откройте письмо от Cloudflare, нажмите в нём ссылку и повторите"
+	case e.Code == 6003 || e.Code == 6111 || strings.Contains(msg, "authorization header") || strings.Contains(msg, "invalid request headers"):
+		return "это не похоже на токен Cloudflare: скопируйте его кнопкой Copy сразу после создания — он показывается один раз"
+	case e.BadToken():
+		return "Cloudflare не принял токен: создайте новый кнопкой «Создать токен» — нужны права «Workers Scripts: Edit» (" + e.Msg + ")"
 	}
 	return fmt.Sprintf("Cloudflare: %s (код %d)", e.Msg, e.Code)
 }
@@ -118,7 +146,7 @@ func (c *Client) account(ctx context.Context) (string, error) {
 		return "", err
 	}
 	if len(accounts) == 0 {
-		return "", errors.New("у токена нет доступа ни к одному аккаунту Cloudflare")
+		return "", errors.New("у токена нет доступа ни к одному аккаунту Cloudflare: создайте токен заново и в «Account Resources» оставьте «All accounts»")
 	}
 	return accounts[0].ID, nil
 }
@@ -172,16 +200,41 @@ func (c *Client) upload(ctx context.Context, account, code, region string) error
 	return c.do(ctx, http.MethodPut, "/accounts/"+account+"/workers/scripts/"+ScriptName, w.FormDataContentType(), &body, nil)
 }
 
-// Deploy загружает воркер FI в аккаунт, закрепляет в регионе и включает адрес на workers.dev.
-// Возвращает домен воркера: fi-tg.<поддомен>.workers.dev.
-func (c *Client) Deploy(ctx context.Context, code, region string) (string, error) {
+// LooksLikeToken — строка похожа на токен Cloudflare: 40 и больше букв, цифр, «_» и «-».
+// Проверка грубая — чтобы сразу сказать человеку, что он вставил не то (адрес сайта, пароль).
+func LooksLikeToken(s string) bool {
+	if len(s) < 40 || len(s) > 200 {
+		return false
+	}
+	for _, r := range s {
+		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '_' || r == '-') {
+			return false
+		}
+	}
+	return true
+}
+
+// Account проверяет токен и возвращает аккаунт, в который пойдёт воркер: первый, к которому
+// у токена есть доступ.
+func (c *Client) Account(ctx context.Context) (string, error) {
 	if strings.TrimSpace(c.Token) == "" {
 		return "", errors.New("вставьте токен Cloudflare")
 	}
-	account, err := c.account(ctx)
+	return c.account(ctx)
+}
+
+// Deploy загружает воркер FI в аккаунт, закрепляет в регионе и включает адрес на workers.dev.
+// Возвращает домен воркера: fi-tg.<поддомен>.workers.dev.
+func (c *Client) Deploy(ctx context.Context, code, region string) (string, error) {
+	account, err := c.Account(ctx)
 	if err != nil {
 		return "", err
 	}
+	return c.DeployTo(ctx, account, code, region)
+}
+
+// DeployTo — как Deploy, но в уже известный аккаунт.
+func (c *Client) DeployTo(ctx context.Context, account, code, region string) (string, error) {
 	sub, err := c.subdomain(ctx, account)
 	if err != nil {
 		return "", err

@@ -2,34 +2,32 @@ package main
 
 import (
 	"log"
+	"time"
 
 	"fi/internal/winsvc"
 )
 
-// pacGoneChecks — сколько опросов подряд PAC FI должен отсутствовать без прокси VPN, чтобы
-// считать, что его убрал человек: VPN-клиент при подключении сначала стирает PAC и лишь
-// через мгновение включает свой прокси.
-const pacGoneChecks = 2
-
 // syncSitesPAC держит системный PAC Windows в согласии со службой: пока включены сайты через
-// воркер в браузерах, браузеры спрашивают у FI, куда идти. Когда VPN-клиент включает свой
-// системный прокси, браузеры ведёт он, а FI ждёт, пока VPN выключат. Если же человек сам убрал
-// сценарий в параметрах Windows, FI его не возвращает, а выключает функцию: решает человек.
+// воркер в браузерах, браузеры спрашивают у FI, куда идти. Когда включён VPN — с системным
+// прокси или с туннелем, — браузеры ведёт он: служба сценарий не просит, и FI его убирает.
+// VPN выключили — сценарий возвращается. Пропавший сценарий FI ставит снова (его стирают
+// VPN-клиенты), а функцию выключает, только если сценарий убирают раз за разом.
 func (t *tray) syncSitesPAC(base string) {
 	s := loadTraySettings()
-	if base != "" && s.SitesPACSet && winsvc.UserRemovedPAC(winsvc.CurrentPAC()) {
-		if t.pacGone++; t.pacGone < pacGoneChecks {
-			return
-		}
-		t.pacGone = 0
+	cur, manual := winsvc.CurrentPAC()
+	switch t.pac.Decide(time.Now(), base, cur, manual, s.SitesPACSet) {
+	case winsvc.PACWait:
+		return
+	case winsvc.PACRestore:
+		log.Print("сценарий прокси FI пропал из параметров Windows (его стирают VPN-клиенты) — возвращён")
+	case winsvc.PACGiveUp:
 		s.SitesPACSet = false
 		saveTraySettings(s)
-		log.Print("сценарий прокси FI убран в параметрах Windows — сайты через воркер в браузерах выключены")
+		log.Print("сценарий прокси FI убирают раз за разом — сайты через воркер в браузерах выключены")
 		go t.command("set_via_worker_browsers", map[string]bool{"on": false})
-		t.toast("Сайты через воркер в браузерах выключены", "Вы убрали сценарий прокси FI в параметрах Windows — FI его больше не ставит. Включить снова: Настройки → «Сайты через воркер».")
+		t.toast("Сайты через воркер в браузерах выключены", "Сценарий прокси FI в параметрах Windows несколько раз убирали — FI его больше не ставит. Включить снова: Настройки → Cloudflare.")
 		return
 	}
-	t.pacGone = 0
 	msg := ""
 	if err := winsvc.SyncSystemPAC(base); err != nil {
 		msg = err.Error()

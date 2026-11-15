@@ -31,6 +31,7 @@ import (
 	"fi/internal/diag"
 	"fi/internal/ipc"
 	"fi/internal/trayicon"
+	"fi/internal/winsvc"
 )
 
 //go:embed all:ui
@@ -79,7 +80,9 @@ func main() {
 	mux.HandleFunc("POST /app/theme", t.handleTheme)
 	mux.HandleFunc("POST /app/release", t.handleRelease)
 	mux.HandleFunc("POST /app/worker/copy", t.handleWorkerCopy)
-	mux.HandleFunc("POST /app/worker/deploy", t.handleWorkerDeploy)
+	mux.HandleFunc("POST /app/cloudflare/open", t.handleCloudflareOpen)
+	mux.HandleFunc("POST /app/programs/add", t.handleProgramAdd)
+	mux.HandleFunc("POST /app/programs/run", t.handleProgramRun)
 	mux.HandleFunc("POST /app/telegram/open", t.handleTelegramOpen)
 	mux.HandleFunc("POST /app/telegram/copy", t.handleTelegramCopy)
 	mux.HandleFunc("POST /app/telegram/clients", t.handleTelegramClients)
@@ -190,9 +193,11 @@ type tray struct {
 	notified  map[string]time.Time // только из watch
 	alerts    serviceAlerts        // только из watch
 	pacErr    string               // только из watch: последняя ошибка системного PAC, чтобы не повторять в журнале
-	pacGone   int                  // только из watch: опросов подряд, где PAC FI пропал без прокси VPN
-	exe       string               // свой файл: если установщик его заменил, окно перезапускается
-	exeTime   time.Time
+	pac       winsvc.PACWatch      // только из watch: что случалось со сценарием прокси FI
+	// cutsNotified — когда последний раз уведомляли об обрывах Cloudflare; только из watch.
+	cutsNotified time.Time
+	exe          string // свой файл: если установщик его заменил, окно перезапускается
+	exeTime      time.Time
 
 	mu           sync.Mutex
 	enabled      bool
@@ -219,7 +224,22 @@ type status struct {
 	} `json:"app"`
 	Telegram struct {
 		SitesPAC string `json:"sites_pac"`
+		Worker   string `json:"worker"`
 	} `json:"telegram"`
+	// Cloudflare — расход бесплатного тарифа воркера: о лимите и обрывах человек должен узнать
+	// сам, а не гадать, почему перестало работать.
+	Cloudflare struct {
+		Requests     int       `json:"requests"`
+		Limit        int       `json:"limit"`
+		LimitedUntil time.Time `json:"limited_until"`
+		ResetAt      time.Time `json:"reset_at"`
+		Cuts         int       `json:"cuts"`
+		Setup        *struct {
+			Busy   bool `json:"busy"`
+			Done   bool `json:"done"`
+			Update bool `json:"update"`
+		} `json:"setup"`
+	} `json:"cloudflare"`
 	AntiCheat string `json:"anti_cheat"`
 	QUICOff   bool   `json:"browser_quic_off"`
 	Task      *struct {
@@ -374,6 +394,7 @@ func (t *tray) notifyChanges(prev, cur *status) {
 	if prev.Paused != "" && cur.Paused == "" && cur.Enabled {
 		t.notify("Обход снова включён", "Пауза закончилась.")
 	}
+	t.notifyCloudflare(prev, cur)
 	if cur.App.UpdateAvailable && !cur.App.Configured && cur.App.Latest != prev.App.Latest {
 		t.notify("Вышла FI "+cur.App.Latest, "Откройте FI → Настройки, чтобы скачать новую версию.")
 	}
@@ -399,6 +420,55 @@ func (t *tray) notifyChanges(prev, cur *status) {
 			t.notify("Снова работает: "+a.title, "")
 		}
 	}
+}
+
+// notifyCloudflare сообщает о расходе бесплатного тарифа воркера: лимит на исходе, лимит
+// исчерпан, Cloudflare обрывает загрузки, воркер обновился сам.
+func (t *tray) notifyCloudflare(prev, cur *status) {
+	if cur.Telegram.Worker == "" {
+		return
+	}
+	for _, n := range cloudflareNotices(prev, cur) {
+		if n[0] == cutsTitle {
+			// Счёт обрывов идёт за десять минут и при вялых обрывах колеблется у порога: без
+			// паузы уведомление всплывало бы снова и снова.
+			if time.Since(t.cutsNotified) < cutsNotifyEvery {
+				continue
+			}
+			t.cutsNotified = time.Now()
+		}
+		t.notify(n[0], n[1])
+	}
+}
+
+const (
+	// cutsToNotify — после стольких обрывов за десять минут это уже не случайность.
+	cutsToNotify    = 5
+	cutsTitle       = "Cloudflare обрывает загрузки"
+	cutsNotifyEvery = time.Hour
+)
+
+// cloudflareNotices — уведомления о воркере при переходе от prev к cur: заголовок и текст.
+func cloudflareNotices(prev, cur *status) [][2]string {
+	var out [][2]string
+	p, c := prev.Cloudflare, cur.Cloudflare
+	clock := func(at time.Time) string { return at.Local().Format("15:04") }
+	switch {
+	case p.LimitedUntil.IsZero() && !c.LimitedUntil.IsZero():
+		out = append(out, [2]string{"Суточный лимит Cloudflare исчерпан",
+			"Воркер снова заработает в " + clock(c.LimitedUntil) + ". Telegram идёт запасным путём; сайты через воркер и закрытые ролики YouTube до тех пор не откроются."})
+	case c.Limit > 0 && c.LimitedUntil.IsZero() && p.Requests*5 < p.Limit*4 && c.Requests*5 >= c.Limit*4:
+		out = append(out, [2]string{"Израсходовано 80% лимита Cloudflare",
+			"Telegram переходит на запасной путь, чтобы запросов хватило сайтам и видео. Счётчик обнулится в " + clock(c.ResetAt) + "."})
+	}
+	if p.Cuts < cutsToNotify && c.Cuts >= cutsToNotify {
+		out = append(out, [2]string{cutsTitle,
+			"Бесплатному воркеру не хватает процессорного времени на долгое видео и большие файлы. Переписка и сайты идут как прежде."})
+	}
+	if p.Setup != nil && p.Setup.Busy && p.Setup.Update && c.Setup != nil && c.Setup.Done {
+		out = append(out, [2]string{"Воркер Cloudflare обновлён", "FI загрузил в ваш аккаунт новый код воркера."})
+	}
+	return out
 }
 
 // serviceAlerts решает, о чём уведомлять. Поломка считается настоящей, только если её

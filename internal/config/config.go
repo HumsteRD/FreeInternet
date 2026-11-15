@@ -73,6 +73,15 @@ type Config struct {
 	PublicDNS bool `json:"public_dns,omitempty"`
 	// PausedUntil — обход на паузе: в это время он включится сам.
 	PausedUntil time.Time `json:"paused_until,omitzero"`
+	// Apps — программы, которые человек запускает из FI через Cloudflare: всё, что такая
+	// программа открывает, идёт через воркер (локальный прокси на порту Telegram.Port+2).
+	Apps []App `json:"apps,omitempty"`
+}
+
+// App — программа для запуска через Cloudflare.
+type App struct {
+	Path string `json:"path"` // файл .exe
+	Name string `json:"name"` // как показывать в окне
 }
 
 // Telegram — встроенный прокси для Telegram Desktop.
@@ -90,6 +99,9 @@ type Telegram struct {
 	// WorkerKey — секрет, который FI вписывает в код воркера: с ним воркер пускает к сайтам
 	// «через воркер», без него — только к Telegram. Создаётся при первом запуске.
 	WorkerKey string `json:"worker_key,omitempty"`
+	// WorkerRegion — где закреплён воркер, созданный мастером (de, nl, us): с этим же
+	// закреплением FI обновляет его код.
+	WorkerRegion string `json:"worker_region,omitempty"`
 }
 
 // DefaultCheckEvery — как часто проверять сервисы. Раньше было 15 минут, и поломка YouTube
